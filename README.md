@@ -1,114 +1,44 @@
 # Capture
 
-**I judge vision-model outputs. Consensus decides who gets paid.**
+**Humans judge a vision model's outputs. Consensus decides who gets paid. $SKR on Solana.**
 
-We designed Capture for the Solana Seeker mobile. Capture is a mobile RLHF
-preference-judging network. A judge sees
-two vision-model outputs and picks the better one (A/B preference) or rates a
-single output 1–5. Aggregated preferences become an RLHF preference dataset,
-with trust priced into every judgment through a slashable **test $SKR** stake.
+Capture is a decentralized RLHF platform for the Solana Seeker mobile. Contributors stake a $SKR bond, judge a vision model's outputs, and earn $SKR only when their judgment agrees with the crowd. Dissenters earn nothing, and systematic bad faith costs the bond. The result is an RLHF preference dataset with on-chain provenance, produced without a labeling firm and without guessing.
 
-## The judgment product
+## What it does
 
-Humans judge a vision model's outputs for RLHF. The incentive is
-**consensus-gated pay in test $SKR**: every pair goes to K=3 judges; the
-majority pick (or the crowd median for ratings) wins, aligned judges are paid
-(`base_skr × level multiplier`), dissenters earn nothing, and **"can't tell" is
-a first-class answer** that re-routes the pair instead of forcing a guess.
+- **Prove human.** On-device liveness and anti-spoofing (CameraX, ML Kit, LiteRT). No biometric data leaves the phone.
+- **Stake.** A judge deposits a $SKR bond to unlock paid work.
+- **Judge.** See two outputs, pick the better one (A/B), or rate one output 1 to 5. A two-second tap. "Can't tell" is always allowed and never forced.
+- **Resolve.** Every pair goes to three judges. The majority pick wins.
+- **Pay or slash.** Judges who agreed get paid $SKR. Judges who disagreed earn nothing. Systematic disagreement runs a two-strike warn-then-slash on the bond.
+- **Anchor.** Each resolved batch commits a Merkle root on-chain, so every label traces to a bonded, consensus-aligned human judgment.
 
-The full loop:
+## The idea in one line
 
-1. **Stake.** I sign in with Seeker Wallet and deposit a test $SKR bond on-chain. The
-   bond is the stake I can lose for systematic disagreement.
-2. **Judge.** The judge answers A/B or 1–5 pairs. One judge cannot answer the
-   same pair twice.
-3. **Resolve.** K substantive votes resolve the pair. Neutral votes ("can't
-   tell"/"tie") never count as dissent and never inflate the quorum. A genuine
-   split adds one tiebreaker judge.
-4. **Pay or slash.** Aligned judges earn test $SKR (journaled before broadcast,
-   idempotent per judgment). A judge whose rolling agreement rate stays below a
-   floor runs the two-strike warn/slash ladder on-chain (full bond forfeit on
-   the second strike).
-5. **Anchor.** Each fully-resolved batch records a Merkle root and commits it
-   on-chain via `post_batch` as dataset provenance (append-only per batch; a
-   failed final anchor is retried idempotently).
+Consensus-gated pay makes farming unprofitable. A random tapper agrees with the crowd roughly half the time, so spam earns about half the base rate. The only reliable way to earn is to judge well. The bond adds skin in the game: bad faith has a real cost.
 
-A judge-accuracy ladder (agreement-rate driven) raises the rate multiplier from
-1.00 up to 2.00 across five levels.
+## Who it is for
 
-Honest notes (state, do not hide):
+- **Contributors.** Anyone with a phone who wants to earn $SKR for a two-second judgment.
+- **AI teams and labs.** Anyone training a vision model who needs human preference data at scale, without paying enterprise labeling prices.
 
-- **Test tokens.** Pay and bond are both **devnet/test $SKR** (one token, three
-  jobs). Not real value. The UI and `/health` both say so.
-- **Majority-preference bias.** RLHF on majority preference flattens minority and
-  edge preferences. This is fine for a first pass, but the dataset does **not**
-  represent all humans. Do not claim it does.
-- K, thresholds, and rates are starting hypotheses, tune against real agreement
-  data, not once.
-- **Seed data.** The demo is seeded with 100 judgment pairs whose output URLs
-  are placeholders (real vision-model outputs are loaded by the training
-  pipeline, out of scope for the hackathon). This proves the judging
-  infrastructure, not a production dataset.
+## Token
 
-## Payout economics
-
-I earn a base **0.02 $SKR per aligned judgment**, times my level
-multiplier. Dissent earns **0 $SKR**. "Can't tell" earns a flat **0.005 $SKR**
-and re-routes the pair. These are **test $SKR on devnet, not real value**.
-The token uses 6 decimals; these amounts are not USD prices.
-
-| Level | Agreement | Rate multiplier |
-|---|---|---|
-| Scout | no gate | ×1.00 |
-| Regular | ≥80% | ×1.10 |
-| Veteran | ≥88% | ×1.25 |
-| Expert | ≥93% | ×1.50 |
-| Pathfinder | ≥97% | ×2.00 |
-
-My agreement rate determines my level multiplier. Payout and bond use the
-same test $SKR token.
-
-## Token & settlement
-
-- **test $SKR**, one token, three jobs: the **payout** (consensus-aligned
-  judgments earn $SKR), the **bond** (deposit to unlock paid judging), and the
-  **slash** collateral (lose stake for systematic disagreement). A devnet
-  fixture mint we control.
-
-Settlement is **real on-chain**: the SKR bond escrows on-chain at deposit,
-aligned judges are paid test $SKR on agreement (minted by the treasury), and a
-systematic disagreement warns then slashes the SKR bond to a penalty vault.
+$SKR does three jobs: stake, reward, slash. One token. Payout and bond use the same token, so the loop is closed and self-funding.
 
 ## Status
 
-October 13 2026:
+Everything runs on **devnet test $SKR**, not real value. The app and the health endpoint both say so.
 
-- Deployed to **Solana devnet**; the judgment API is live (devnet test tokens).
-- **44 backend tests** pass; **3 SBF runtime tests** are skipped because this
-  clone has no compiled program artifact. Solana Seeker Kotlin compilation passes.
-  The supplied Python venv needs a temporary `pydantic-core==2.46.5` overlay
-  to match its installed Pydantic version.
-- Payout, bond, and slash use a single test $SKR token in this source revision.
-  This branding change does not build or deploy the on-chain program.
-  The single-mint program is live on devnet (program
-  `5TiDwP86k95yfQWzExrPTj5qcKxED99z8pW9fN81u5SV`, upgradeable).
-- Seeded with **100 judgment pairs** (60 A/B preference + 40 rating) for the demo.
-- Everything here runs on **devnet test tokens**.
+Honest notes:
 
-Not done / honest caveats:
-
-- Liveness is an on-device motion challenge, not bank-grade anti-spoofing
-  (device attestation is a roadmap item). It is present but is not yet a hard
-  gate in the judging path.
-- Sybil resistance is partial: the bond raises the cost of fake accounts but
-  does not eliminate them.
-- **Video / frame-sequence judging** is the next tier (motion and sequence
-  perception) and is planned but not yet live, the demo judges still images.
+- **Test tokens only.** Pay and bond are devnet test $SKR.
+- **Majority-preference bias.** RLHF on majority preference flattens minority and edge preferences. The dataset does not claim to represent all humans.
+- **Seed data.** The demo is seeded with placeholder image URLs. This proves the judging infrastructure, not a production dataset.
 
 ## Install the app
 
-The Solana Seeker client ships as a debug APK (devnet build, test tokens
-only); the same flows are available in the web dapp.
+The Solana Seeker client ships as a debug APK (devnet build, test tokens only). The same flows are available in the web app.
 
 ## Repository layout
 
@@ -128,11 +58,10 @@ only); the same flows are available in the web dapp.
 
 ## Quick start
 
-Four commands from a fresh clone to a running backend (devnet, throwaway
-dev-only keys, never the real verifier secret):
+Four commands from a fresh clone to a running backend (devnet, throwaway dev-only keys):
 
 ```bash
-git clone https://github.com/chunli0x/capture.git && cd capture
+git clone https://github.com/chunli0x/captureforclockin.git && cd captureforclockin
 
 # 1. PostgreSQL (Docker), loopback-only by default
 docker compose up -d
@@ -149,33 +78,12 @@ curl -s http://localhost:8000/health
 
 Notes:
 
-- The backend listens on **port 8000**.
-- `dev_bootstrap.sh` generates a freshly generated dev-only verifier keypair
-  (`backend/verifier.dev.json`) and writes it to `backend/.env`. This is
-  intentionally **not** the real verifier, the real key authorizes every
-  warn/slash/anchor and is never committed. Anything that needs the real
-  verifier on-chain will fail until you point `SEEKER_VERIFIER_KEY_FILE` at
-  your own keypair.
-- No Docker? Use SQLite instead, set `SEEKER_LOCAL_SQLITE=true` and
-  `SEEKER_DATABASE_URL=sqlite:///./seeker.db`.
-- The dependency set is tested on Python 3.11. If `python3` is a newer minor,
-  pass `PYTHON=python3.11 ./scripts/dev_bootstrap.sh`.
+- The backend listens on port 8000.
+- `dev_bootstrap.sh` generates a dev-only verifier keypair and writes it to `backend/.env`. The real verifier key is never committed. Anything needing the real verifier on-chain will fail until you point `SEEKER_VERIFIER_KEY_FILE` at your own keypair.
+- No Docker? Use SQLite: set `SEEKER_LOCAL_SQLITE=true` and `SEEKER_DATABASE_URL=sqlite:///./seeker.db`.
+- The dependency set is tested on Python 3.11. On a newer minor, run `PYTHON=python3.11 ./scripts/dev_bootstrap.sh`.
 
-## Build & run
-
-Backend:
-
-```bash
-cd backend
-.venv/bin/pip install -r requirements-seeker.txt
-.venv/bin/python -m seeker.migrate
-.venv/bin/uvicorn seeker.api:production_app --factory --env-file .env
-```
-
-(Or just run `./scripts/dev_bootstrap.sh`, which does all of the above and
-writes `backend/.env`.)
-
-Tests:
+## Build and test
 
 ```bash
 # backend
