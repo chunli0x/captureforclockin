@@ -85,7 +85,7 @@ October 13 2026:
 
 - Deployed to **Solana devnet**; the judgment API is live (devnet test tokens).
 - **44 backend tests** pass; **3 SBF runtime tests** are skipped because this
-  clone has no compiled program artifact. Android Kotlin compilation passes.
+  clone has no compiled program artifact. Solana Seeker Kotlin compilation passes.
   The supplied Python venv needs a temporary `pydantic-core==2.46.5` overlay
   to match its installed Pydantic version.
 - Payout, bond, and slash use a single test $SKR token in this source revision.
