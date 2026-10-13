@@ -40,6 +40,12 @@ Honest notes:
 
 The Solana Seeker client ships as a debug APK (devnet build, test tokens only). The same flows are available in the web app.
 
+## Screenshots
+
+| Judge | Judge (list) | Calibrate | Standing | Balances |
+|---|---|---|---|---|
+| ![Judge](docs/screenshots/01-judge-mountains.jpg) | ![Judge list](docs/screenshots/02-judge-interior.jpg) | ![Calibrate](docs/screenshots/03-calibrate-guide.jpg) | ![Standing](docs/screenshots/04-calibrate-standing.jpg) | ![Balances](docs/screenshots/05-balances.jpg) |
+
 ## Repository layout
 
 ```
