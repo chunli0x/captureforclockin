@@ -44,6 +44,14 @@ Honest notes:
 - **Majority-preference bias.** RLHF on majority preference flattens minority and edge preferences. The dataset does not claim to represent all humans.
 - **Seed data.** The demo is seeded with placeholder image URLs. This proves the judging infrastructure, not a production dataset.
 
+## Roadmap
+
+- **Human Seeker NFT.** Depositing the $SKR bond mints an NFT as a certificate of human authenticity, so every bonded judge is a verified human.
+- **$SKR swap.** An in-app swap so judges can move in and out of $SKR, with margin captured on the trade.
+- **Video / frame-sequence judging.** Judge motion and sequence clips, not just still frames.
+- **Hardware-backed attestation.** Move liveness from an on-device motion check to device attestation for stronger anti-spoofing.
+- **Mainnet.** Move from devnet test $SKR to the production $SKR token.
+
 ## Install the app
 
 The Solana Seeker client ships as a debug APK (devnet build, test tokens only). The same flows are available in the web app.
