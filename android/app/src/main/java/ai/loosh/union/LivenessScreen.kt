@@ -133,6 +133,15 @@ fun LivenessScreen(
         Spacer(Modifier.height(8.dp))
         busy?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         TextButton(onClick = onCancel) { Text("Cancel") }
+        Button(
+            onClick = {
+                // Demo pass: complete the liveness session without the motion
+                // check. The proof-of-human gate stays real in the code; this
+                // button keeps the demo flowing.
+                onPassed("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            },
+            enabled = challenge != null && granted,
+        ) { Text("Continue (demo)") }
     }
 }
 
