@@ -49,6 +49,7 @@ Honest notes:
 - **Human Seeker NFT.** Depositing the $SKR bond mints an NFT as a certificate of human authenticity, so every bonded judge is a verified human.
 - **$SKR swap.** An in-app swap so judges can move in and out of $SKR, with margin captured on the trade.
 - **Video / frame-sequence judging.** Judge motion and sequence clips, not just still frames.
+- **Vision-model data pipeline.** Integrate the judged dataset with a vision-model training pipeline, so accepted labels flow to training with on-chain provenance.
 - **Hardware-backed attestation.** Move liveness from an on-device motion check to device attestation for stronger anti-spoofing.
 - **Mainnet.** Move from devnet test $SKR to the production $SKR token.
 
