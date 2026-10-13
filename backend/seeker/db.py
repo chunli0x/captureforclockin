@@ -45,11 +45,12 @@ class Actor(Base):
     # Server-side liveness gate. Set once a wallet completes a server-issued
     # liveness session (see /liveness/complete). Proof-of-human, not bank-grade.
     liveness_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Legacy *_usdc column names store test $SKR units; retained to avoid a migration.
     # Bond gate (all server-recorded): bonded == the devnet bond was deposited;
-    # usdc_funded == the devnet test-USDC faucet ran.
+    # usdc_funded == the devnet test $SKR faucet ran.
     bonded: Mapped[bool] = mapped_column(Boolean, default=False)
     usdc_funded: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Number of times this wallet has tapped the devnet test-USDC faucet
+    # Number of times this wallet has tapped the devnet test $SKR faucet
     # (capped at faucet_max_mints). usdc_funded stays as the "funded at least
     # once" flag for the deposit gate.
     faucet_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -57,7 +58,7 @@ class Actor(Base):
     # calibrated == passed the N-pair calibration gate (unpaid) and may stake +
     # judge. agreement_rate == rolling fraction of resolved judgments this judge
     # was aligned on (last judge_window). judged_count == resolved judgments
-    # participated in. staked_usdc == the USDC bond escrowed on deposit (mirror).
+    # participated in. staked_usdc == the SKR bond escrowed on deposit (mirror).
     # warnings == mirror of the on-chain bond.warnings ladder (0 clean, 1 warned,
     # >= 2 slashed).
     calibrated: Mapped[bool] = mapped_column(Boolean, default=False)

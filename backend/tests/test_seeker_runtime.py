@@ -54,7 +54,7 @@ def runtime(tmp_path):
     chain = Chain(
         SimpleNamespace(
             program_id="5TiDwP86k95yfQWzExrPTj5qcKxED99z8pW9fN81u5SV",
-            usdc_mint=str(Keypair().pubkey()),
+            skr_mint=str(Keypair().pubkey()),
             verifier_key_file=key,
             min_bond=100,
             cluster="localnet",
@@ -64,7 +64,7 @@ def runtime(tmp_path):
     svm.add_program(chain.program, SO.read_bytes())
     for k in (admin, worker, other, verifier):
         svm.airdrop(k.pubkey(), 10_000_000_000)
-    for mint in (chain.usdc,):
+    for mint in (chain.skr,):
         svm.set_account(mint, mint_account(admin.pubkey()))
         for k in (admin, worker, other):
             svm.set_account(
@@ -75,13 +75,13 @@ def runtime(tmp_path):
         discriminator("Config", "account")
         + bytes(admin.pubkey())
         + bytes(verifier.pubkey())
-        + bytes(chain.usdc)
+        + bytes(chain.skr)
         + struct.pack("<Q", 100)
         + bytes(verifier.pubkey())  # slash_authority == verifier
     )
     svm.set_account(chain.config, Account(10_000_000, cfg, chain.program))
-    # penalty_vault: program-owned USDC token account (authority == config).
-    svm.set_account(chain.penalty_vault, token_account(chain.usdc, chain.config, 0))
+    # penalty_vault: program-owned $SKR token account (authority == config).
+    svm.set_account(chain.penalty_vault, token_account(chain.skr, chain.config, 0))
     clock = svm.get_clock()
     clock.unix_timestamp = 100
     svm.set_clock(clock)
@@ -129,17 +129,17 @@ def balance(rt, wallet, mint):
 def test_bond_deposit_withdraw_roundtrip(runtime):
     rt = runtime
     svm, c, _admin, worker, _other, _verifier = rt
-    assert balance(rt, worker.pubkey(), c.usdc) == 10_000
+    assert balance(rt, worker.pubkey(), c.skr) == 10_000
     ok(send(rt, "deposit", worker))
-    # deposit escrows min_bond (100) USDC into the bond vault.
-    assert balance(rt, worker.pubkey(), c.usdc) == 9_900
+    # deposit escrows min_bond (100) $SKR into the bond vault.
+    assert balance(rt, worker.pubkey(), c.skr) == 9_900
     # Withdraw is locked until the cooldown elapses (unlock_at = deposit + 1 day).
     bad(send(rt, "withdraw", worker))
     clock = svm.get_clock()
     clock.unix_timestamp = 86_501
     svm.set_clock(clock)
     ok(send(rt, "withdraw", worker))
-    assert balance(rt, worker.pubkey(), c.usdc) == 10_000
+    assert balance(rt, worker.pubkey(), c.skr) == 10_000
 
 
 def test_warn_then_slash_ladder_drains_bond_to_penalty_vault(runtime):
@@ -193,7 +193,7 @@ def test_initializer_requires_program_upgrade_authority(runtime):
             [
                 meta(who.pubkey(), True, True),
                 meta(c.config, writable=True),
-                meta(c.usdc),
+                meta(c.skr),
                 meta(c.penalty_vault, writable=True),
                 meta(c.program),
                 meta(data_address),

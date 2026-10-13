@@ -25,7 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 
 /**
- * The bond gate for the judgment product: deposit the minimum test-USDC stake
+ * The bond gate for the judgment product: deposit the minimum test $SKR stake
  * before judging. The bond is a real on-chain escrow, slashed only for
  * systematic disagreement with the consensus ladder.
  */
@@ -49,7 +49,7 @@ fun BondScreen(
             CaptureWordmark()
             Text("Stake to judge", style = MaterialTheme.typography.displaySmall, color = CaptureInk)
             Text(
-                "Judging requires posting a test-USDC bond, a real on-chain escrow. It is " +
+                "I deposit a test \$SKR bond with Seeker Wallet, a real on-chain escrow. It is " +
                     "slashed only for systematic disagreement; withdraw what remains later.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MutedGray,
@@ -68,7 +68,7 @@ fun BondScreen(
 private fun BondCard(s: PilotState, vm: SeekerViewModel, sender: ActivityResultSender) {
     CapturePanel(Modifier.fillMaxWidth(), elevated = true) {
         Text(
-            "DEPOSIT THE MINIMUM TEST-USDC BOND",
+            "DEPOSIT THE MINIMUM TEST \$SKR BOND",
             style = MaterialTheme.typography.labelMedium,
             color = CaptureAccentBright,
         )
@@ -79,10 +79,10 @@ private fun BondCard(s: PilotState, vm: SeekerViewModel, sender: ActivityResultS
             color = MutedGray,
         )
         when {
-            s.bonded -> DoneRow("Bond deposited — you can judge now.")
+            s.bonded -> DoneRow("Bond deposited, you can judge now.")
             else -> {
                 if (s.bondFunded) {
-                    DoneRow("Test USDC funded.")
+                    DoneRow("Test \$SKR funded.")
                     Button(
                         onClick = { vm.depositBond(sender) },
                         enabled = !s.busy,
@@ -94,11 +94,11 @@ private fun BondCard(s: PilotState, vm: SeekerViewModel, sender: ActivityResultS
                         onClick = { vm.faucet() },
                         enabled = !s.busy,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Get test USDC (${s.faucetMints}/${s.faucetMaxMints})") }
+                    ) { Text("Get test \$SKR (${s.faucetMints}/${s.faucetMaxMints})") }
                 }
                 if (!s.bondFunded)
                     Text(
-                        "Fund test USDC first, then deposit the bond.",
+                        "Fund test \$SKR first, then deposit the bond.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MutedGray,
                     )

@@ -5,7 +5,7 @@ they aligned with the crowd. This is a different meaning from the capture
 ladder (which gates on accepted-count + acceptance-rate), so it lives in its
 own module and must not reuse `leveling.py`'s table.
 
-Payout is ``judge_base_usdc × multiplier`` per aligned judgment. Status (level)
+Payout is ``judge_base_skr × multiplier`` per aligned judgment. Status (level)
 is free; only the multiplier costs money.
 """
 

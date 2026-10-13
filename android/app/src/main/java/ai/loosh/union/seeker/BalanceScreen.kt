@@ -14,13 +14,13 @@ import kotlin.math.floor
 /** 1 token = 1_000_000 base units (6 decimals), matching the SPL mints. */
 private const val TOKEN_UNITS = 1_000_000.0
 
-/** Formats token base units as a human amount, e.g. 1_000_000 -> "1.00". */
+/** Formats token base units as a human amount, e.g. 1_000_000 -> "1", 1 -> "0.000001". */
 fun formatToken(units: Long): String {
     val tokens = units / TOKEN_UNITS
-    return if (tokens == floor(tokens)) "%.0f".format(tokens) else "%.2f".format(tokens)
+    return if (tokens == floor(tokens)) "%.0f".format(tokens) else "%.6f".format(tokens).trimEnd('0')
 }
 
-/** The balances page: what a judge has earned (USDC) and staked (USDC), plus the
+/** The balances page: what a judge has earned (\$SKR) and staked (\$SKR), plus the
  *  level ladder. Test tokens on devnet, not real value. */
 @Composable
 fun BalanceScreen(s: PilotState, vm: SeekerViewModel, onBack: () -> Unit) {
@@ -36,7 +36,7 @@ fun BalanceScreen(s: PilotState, vm: SeekerViewModel, onBack: () -> Unit) {
             CaptureWordmark()
             EditorialHeading("BALANCES.")
             Text(
-                "Earned in test USDC, staked in test USDC — devnet only, not real value.",
+                "Earned in test \$SKR, staked in test \$SKR, devnet only, not real value.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MutedGray,
             )
@@ -52,12 +52,12 @@ fun BalanceScreen(s: PilotState, vm: SeekerViewModel, onBack: () -> Unit) {
 private fun BalanceCard(s: PilotState) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            BalanceModule("Earned", s.judgeEarnedUsdc, CaptureSymbol.COINS, Modifier.weight(1f).fillMaxHeight())
-            BalanceModule("Pending", s.judgePendingUsdc, CaptureSymbol.CLOCK, Modifier.weight(1f).fillMaxHeight())
+            BalanceModule("Earned", s.judgeEarnedSkr, CaptureSymbol.COINS, Modifier.weight(1f).fillMaxHeight())
+            BalanceModule("Pending", s.judgePendingSkr, CaptureSymbol.CLOCK, Modifier.weight(1f).fillMaxHeight())
         }
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            BalanceModule("Settled", s.judgeSettledUsdc, CaptureSymbol.VERIFIED, Modifier.weight(1f).fillMaxHeight())
-            BalanceModule("Staked", s.judgeStakedUsdc, CaptureSymbol.LOCK, Modifier.weight(1f).fillMaxHeight())
+            BalanceModule("Settled", s.judgeSettledSkr, CaptureSymbol.VERIFIED, Modifier.weight(1f).fillMaxHeight())
+            BalanceModule("Staked", s.judgeStakedSkr, CaptureSymbol.LOCK, Modifier.weight(1f).fillMaxHeight())
         }
         Text(
             "${s.judgeLevelName} · ×${"%.2f".format(s.judgeRateMultiplier)} rate · ${s.judgeWarnings} warning${if (s.judgeWarnings == 1) "" else "s"}",
@@ -72,6 +72,6 @@ private fun BalanceModule(label: String, amount: Long, symbol: CaptureSymbol, mo
         CaptureIcon(symbol, Modifier.size(28.dp), CaptureAccent)
         Text(label, style = MaterialTheme.typography.titleMedium, color = MutedGray)
         Text(formatToken(amount), style = MaterialTheme.typography.headlineMedium, color = CaptureInk)
-        Text("USDC", style = MaterialTheme.typography.labelSmall, color = MutedGray)
+        Text("\$SKR", style = MaterialTheme.typography.labelSmall, color = MutedGray)
     }
 }

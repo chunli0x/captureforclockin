@@ -12,10 +12,11 @@ class Settings(BaseSettings):
     rpc_url: str = "https://api.devnet.solana.com"
     cluster: str = "devnet"
     program_id: str
-    usdc_mint: str
+    # Required: SEEKER_SKR_MINT supplies the devnet test $SKR mint (6 decimals).
+    skr_mint: str
     verifier_key_file: Path
-    # Devnet treasury: holds the USDC mint authority (the faucet, the bond, and
-    # the settle_usdc payout — one token, three jobs). Optional (0600,
+    # Devnet treasury: holds the $SKR mint authority (the faucet, the bond, and
+    # the settle_skr payout; one token, three jobs). Optional (0600,
     # gitignored). Unset -> the on-chain mint is unavailable and the backend
     # fails closed instead of fabricating it.
     treasury_key_file: Path | None = None
@@ -25,25 +26,25 @@ class Settings(BaseSettings):
     # deposit transaction fee and the bond/vault rent (the deposit is
     # client-signed with payer=worker, so the worker needs lamports). 0.05 SOL.
     faucet_sol_lamports: int = Field(default=50_000_000, gt=0)
-    # A wallet may tap the devnet test-USDC faucet this many times (each tap
-    # mints min_bond test USDC) before it is cut off.
+    # A wallet may tap the devnet test $SKR faucet this many times (each tap
+    # mints min_bond test $SKR) before it is cut off.
     faucet_max_mints: int = Field(default=5, gt=0)
 
     # ---- Judgment product (RLHF preference judging) ----
-    # Consensus-gated pay in test USDC (1:1 USD, 6 decimals). All are starting
+    # Consensus-gated pay in test $SKR (6 decimals, not real value). All are starting
     # hypotheses (incentive spec §8): tune against real agreement data, not once.
     judge_k: int = Field(default=3, gt=0)
     calibration_n: int = Field(default=10, gt=0)
     judge_window: int = Field(default=100, gt=0)
     judge_slash_floor: float = 0.45
     judge_slash_min_judged: int = Field(default=20, gt=0)
-    # Payout in USDC base units (6 decimals). The treasury keypair is the USDC
-    # mint authority; settlement mints test USDC to the judge. USDC is also the
+    # Payout in $SKR base units (6 decimals). The treasury keypair is the $SKR
+    # mint authority; settlement mints test $SKR to the judge. $SKR is also the
     # bond (the slashable collateral). So:
-    #   judge_base_usdc = 0.02 USDC  = $0.02 per aligned judgment (× level multiplier)
-    #   judge_flat_usdc = 0.005 USDC = $0.005 flat "can't tell"
-    judge_base_usdc: int = Field(default=20_000, gt=0)
-    judge_flat_usdc: int = Field(default=5_000, gt=0)
+    #   judge_base_skr = 0.02 $SKR per aligned judgment (× level multiplier)
+    #   judge_flat_skr = 0.005 $SKR flat "can't tell"
+    judge_base_skr: int = Field(default=20_000, gt=0)
+    judge_flat_skr: int = Field(default=5_000, gt=0)
     # Cap on flat "can't tell" payments a judge can earn per rolling window,
     # to bound abstention farming (finding #12): three colluding judges can
     # otherwise send "can't tell" on every fresh pair and collect flat without

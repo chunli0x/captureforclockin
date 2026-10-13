@@ -45,7 +45,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
             CaptureWordmark()
             EditorialHeading("HOW IT WORKS.")
             Text(
-                "You judge a vision model's outputs. Agree with the crowd and earn test USDC on devnet.",
+                "I judge a vision model's outputs. When I agree with the crowd, I earn test \$SKR on devnet.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = CaptureInk,
                 textAlign = TextAlign.Start,
@@ -63,7 +63,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
 private fun FlowCard() {
     CapturePanel(Modifier.fillMaxWidth()) {
         Text("WHAT YOU DO", style = MaterialTheme.typography.labelMedium, color = CaptureAccentBright)
-        Step("1. Stake", "Deposit a slashable test-USDC bond.")
+        Step("1. Stake", "Deposit a slashable test SKR bond.")
         Step("2. Judge", "Compare two outputs (A/B) or rate one 1-5.")
         Step("3. Earn", "Aligned judgments pay. Dissenters earn nothing.")
     }
@@ -108,7 +108,7 @@ private fun ExampleCard() {
             color = MutedGray,
         )
         Text(
-            "Video / frame sequence — coming soon.",
+            "Video / frame sequence, coming soon.",
             style = MaterialTheme.typography.labelSmall,
             color = MutedGray,
         )
@@ -134,17 +134,17 @@ private fun EarningsCard() {
     CapturePanel(Modifier.fillMaxWidth()) {
         Text("WHAT YOU EARN", style = MaterialTheme.typography.labelMedium, color = CaptureAccentBright)
         Text(
-            "Base \$0.02 per aligned judgment, times your level multiplier (up to ×2.00).",
+            "I earn 0.02 \$SKR per aligned judgment, times my level multiplier (up to ×2.00).",
             style = MaterialTheme.typography.bodySmall,
             color = CaptureInk,
         )
         Text(
-            "Dissent pays \$0. \"Can't tell\" pays a flat \$0.005.",
+            "Dissent pays 0 \$SKR. \"Can't tell\" pays a flat 0.005 \$SKR.",
             style = MaterialTheme.typography.bodySmall,
             color = CaptureInk,
         )
         Text(
-            "Test USDC on devnet — not real value.",
+            "Test \$SKR on devnet, not real value.",
             style = MaterialTheme.typography.labelSmall,
             color = MutedGray,
         )

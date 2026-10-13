@@ -22,13 +22,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 
-/** Formats USDC base units with sub-cent precision for pay rates (0.005 USDC). */
-internal fun formatPayUsdc(units: Long): String =
-    "%.3f".format(units / 1_000_000.0).trimEnd('0').trimEnd('.')
+/** Formats \$SKR base units with six-decimal precision for pay rates (0.005 \$SKR). */
+internal fun formatPaySkr(units: Long): String =
+    "%.6f".format(units / 1_000_000.0).trimEnd('0').trimEnd('.')
 
 /**
  * The judgment product screen: a judge compares two model outputs (A/B) or rates
- * one 1-5, with a first-class "can't tell". Earns test USDC; bond is test USDC.
+ * one 1-5, with a first-class "can't tell". Earns test $SKR; bond is test $SKR.
  */
 @Composable
 fun JudgmentScreen(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit, onProveHuman: () -> Unit) {
@@ -46,7 +46,7 @@ fun JudgmentScreen(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit, onPro
             JudgeGuidanceCard()
             Text(
                 "Compare two model outputs and pick the better one. Consensus-aligned judges earn " +
-                    "test USDC on devnet.",
+                    "test \$SKR on devnet.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MutedGray,
                 textAlign = TextAlign.Center,
@@ -94,14 +94,14 @@ private fun JudgeStatsCard(s: PilotState) {
             color = CaptureInk,
         )
         Text(
-            "${s.judgeJudgedCount} judged · ${formatToken(s.judgeStakedUsdc)} USDC staked · ${s.judgeWarnings} warnings",
+            "${s.judgeJudgedCount} judged · ${formatToken(s.judgeStakedSkr)} \$SKR staked · ${s.judgeWarnings} warnings",
             style = MaterialTheme.typography.bodySmall,
             color = MutedGray,
         )
         Text(
-            "Earn ${formatPayUsdc((s.judgeBaseUsdc * s.judgeRateMultiplier).toLong())} USDC per aligned answer " +
-                "(${formatPayUsdc(s.judgeBaseUsdc)} base × ${"%.2f".format(s.judgeRateMultiplier)}) · " +
-                "${formatPayUsdc(s.judgeFlatUsdc)} USDC for can't tell",
+            "Earn ${formatPaySkr((s.judgeBaseSkr * s.judgeRateMultiplier).toLong())} \$SKR per aligned answer " +
+                "(${formatPaySkr(s.judgeBaseSkr)} base × ${"%.2f".format(s.judgeRateMultiplier)}) · " +
+                "${formatPaySkr(s.judgeFlatSkr)} \$SKR for can't tell",
             style = MaterialTheme.typography.bodySmall,
             color = CaptureInk,
         )
@@ -123,7 +123,7 @@ private fun EmptyCard(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit, on
             }
             !s.bonded -> {
                 Text("No pairs to judge right now", style = MaterialTheme.typography.titleMedium, color = CaptureInk)
-                ActionButton("Deposit the USDC bond", onClick = onBond)
+                ActionButton("Deposit the SKR bond", onClick = onBond)
                 SecondaryButton("Refresh", onClick = { vm.judgeNext() }, enabled = !s.busy)
             }
             else -> {
@@ -172,7 +172,7 @@ private fun PairChoice(s: PilotState, vm: SeekerViewModel) {
         }
     }
     if (failCount > 0) {
-        SecondaryButton("Couldn't load the image — try another", onClick = { vm.judgeNext() }, enabled = !s.busy)
+        SecondaryButton("Couldn't load the image, try another", onClick = { vm.judgeNext() }, enabled = !s.busy)
     }
     if (taskType == "rating") {
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),

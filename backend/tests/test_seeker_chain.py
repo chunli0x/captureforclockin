@@ -21,7 +21,7 @@ def chain(tmp_path):
     return Chain(
         SimpleNamespace(
             program_id="5TiDwP86k95yfQWzExrPTj5qcKxED99z8pW9fN81u5SV",
-            usdc_mint=str(Keypair().pubkey()),
+            skr_mint=str(Keypair().pubkey()),
             verifier_key_file=p,
             cluster="localnet",
             rpc_url="http://127.0.0.1:8899",
@@ -98,7 +98,7 @@ def test_environment_binds_config_mints_verifier_and_network(chain):
         discriminator("Config", "account")
         + bytes(Keypair().pubkey())  # admin (not checked)
         + bytes(chain.verifier.pubkey())
-        + bytes(chain.usdc)
+        + bytes(chain.skr)
         + struct.pack("<Q", 1_000_000)
         + bytes(chain.verifier.pubkey())  # slash_authority == verifier
     )
@@ -131,7 +131,7 @@ def test_environment_rejects_stale_config(chain):
         discriminator("Config", "account")
         + bytes(Keypair().pubkey())
         + bytes(chain.verifier.pubkey())
-        + bytes(chain.usdc)
+        + bytes(chain.skr)
         + struct.pack("<Q", 1_000_000)
     )
     account = {
@@ -161,7 +161,7 @@ def test_warn_slash_instruction_layout(chain, payer):
     assert len(ix.accounts) == 6
     assert ix.accounts[0].pubkey == chain.verifier.pubkey() and ix.accounts[0].is_signer
     assert ix.accounts[2].pubkey == chain.pda(b"bond", bytes(payer.pubkey()))
-    assert ix.accounts[3].pubkey == chain.pda(b"bond-vault", bytes(payer.pubkey()), bytes(chain.usdc))
+    assert ix.accounts[3].pubkey == chain.pda(b"bond-vault", bytes(payer.pubkey()), bytes(chain.skr))
     assert ix.accounts[3].is_writable
     assert ix.accounts[4].pubkey == chain.penalty_vault and ix.accounts[4].is_writable
     assert ix.accounts[5].pubkey == TOKEN_PROGRAM_ID
@@ -211,7 +211,7 @@ def test_find_signature_paginates_beyond_first_100(chain, payer):
 def test_faucet_and_settle_build_signed_instructions(chain, tmp_path):
     # Regression: the treasury is a Keypair (not a Pubkey), and the SPL
     # instruction params take pubkeys while _sign_and_send signs with the
-    # Keypair. This exercises both faucet and settle_usdc end to end.
+    # Keypair. This exercises both faucet and settle_skr end to end.
     treasury = Keypair()
     p = tmp_path / "treasury.json"
     p.write_text(json.dumps(list(bytes(treasury))))
@@ -227,16 +227,16 @@ def test_faucet_and_settle_build_signed_instructions(chain, tmp_path):
         if method == "sendTransaction":
             return "sig_" + method
         if method == "getSignatureStatuses":
-            # confirm success so settle_usdc's _confirm_sent passes
+            # confirm success so settle_skr's _confirm_sent passes
             return {"value": [{"err": None, "confirmationStatus": "finalized"}]}
         raise AssertionError(f"unexpected rpc method: {method}")
 
     chain.rpc = fake_rpc
-    # Faucet mints min_bond USDC to the worker (mint authority = treasury).
+    # Faucet mints min_bond $SKR to the worker (mint authority = treasury).
     sig = chain.faucet(str(worker.pubkey()))
     assert sig == "sig_sendTransaction"
-    # Settlement mints test USDC to the judge (mint authority = treasury).
-    sig = chain.settle_usdc(str(worker.pubkey()), 100_000, memo="judgment-1")
+    # Settlement mints test $SKR to the judge (mint authority = treasury).
+    sig = chain.settle_skr(str(worker.pubkey()), 100_000, memo="judgment-1")
     assert sig == "sig_sendTransaction"
 
     # Both produced exactly two sendTransaction calls (one each) and the

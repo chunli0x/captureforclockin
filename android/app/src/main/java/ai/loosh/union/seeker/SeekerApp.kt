@@ -35,8 +35,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 
 /**
- * The judgment product app: sign in, stake, judge, and earn test USDC for
- * consensus-aligned preferences (slashable bond in test USDC).
+ * The judgment product app: sign in, stake, judge, and earn test $SKR for
+ * consensus-aligned preferences (slashable bond in test $SKR).
  */
 @Composable
 fun SeekerApp(sender: ActivityResultSender, vm: SeekerViewModel = viewModel()) {
@@ -134,7 +134,7 @@ private fun TopMenu(
                 Text("CAPTURE", style = MaterialTheme.typography.displaySmall.copy(fontSize = 18.sp, lineHeight = 22.sp), color = CaptureInk)
             }
             Text(
-                "DEVNET · TEST USDC",
+                "DEVNET · TEST \$SKR",
                 style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
                 color = CaptureInk,
                 textAlign = TextAlign.Center,
@@ -183,7 +183,7 @@ private fun SignInScreen(s: PilotState, vm: SeekerViewModel, sender: ActivityRes
             EditorialHeading("SIGN IN.")
             Text(
                 "Compare two model outputs and pick the better one. Consensus-aligned judges " +
-                    "earn test USDC on devnet.",
+                    "earn test \$SKR on devnet.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = CaptureInk,
             )
@@ -227,7 +227,7 @@ private fun SignInScreen(s: PilotState, vm: SeekerViewModel, sender: ActivityRes
                 )
             }
             Text(
-                "Designed for Android",
+                "Designed for the Solana Seeker mobile",
                 style = MaterialTheme.typography.bodyMedium,
                 color = CaptureInk,
             )
@@ -243,7 +243,7 @@ private fun SignInScreen(s: PilotState, vm: SeekerViewModel, sender: ActivityRes
                 ),
                 shape = CaptureRadii.pill,
             ) {
-                Text("Sign in with wallet", style = MaterialTheme.typography.titleMedium)
+                Text("Sign in with Seeker Wallet", style = MaterialTheme.typography.titleMedium)
             }
         }
     }

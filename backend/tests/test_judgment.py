@@ -1,5 +1,5 @@
 """Judgment product (RLHF preference judging) — consensus, calibration, ladder,
-USDC payout, reroute, and the agreement-floor slash trigger."""
+$SKR payout, reroute, and the agreement-floor slash trigger."""
 
 import base64
 
@@ -17,7 +17,7 @@ from solders.keypair import Keypair
 class FakeChain:
     def __init__(self):
         self.prepared = []
-        self.settled_usdc = []  # (wallet, amount) from settle_usdc
+        self.settled_skr = []  # (wallet, amount) from settle_skr
         self.issued = []       # (action, wallet, amount) from issue
         self.posted = []       # (batch_id, root) from post_batch
         self.warnings = 0
@@ -45,12 +45,12 @@ class FakeChain:
         self.issued.append((action, wallet, amount))
         return str(Keypair().sign_message(f"issue-{len(self.issued)}".encode()))
 
-    def settle_usdc(self, wallet, amount):
-        return str(Keypair().sign_message(b"usdc"))
+    def settle_skr(self, wallet, amount):
+        return str(Keypair().sign_message(b"skr"))
 
-    def settle_usdc(self, wallet, amount, memo=None):
-        self.settled_usdc.append((wallet, amount))
-        return str(Keypair().sign_message(f"usdc-{len(self.settled_usdc)}".encode()))
+    def settle_skr(self, wallet, amount, memo=None):
+        self.settled_skr.append((wallet, amount))
+        return str(Keypair().sign_message(f"skr-{len(self.settled_skr)}".encode()))
 
     def faucet(self, wallet):
         return str(Keypair().sign_message(b"faucet"))
@@ -68,7 +68,7 @@ def pilot(tmp_path):
         local_sqlite=True,
         domain="pilot.test",
         program_id=str(Keypair().pubkey()),
-        usdc_mint=str(Keypair().pubkey()),
+        skr_mint=str(Keypair().pubkey()),
         verifier_key_file=tmp_path / "unused",
     )
     app = create_app(settings, chain=chain)
@@ -155,6 +155,30 @@ def ready_judge(c, app, h, calib_ids):
 # ---- calibration gate ----
 
 
+def test_skr_wire_contract_keeps_legacy_storage(pilot):
+    c, app, headers, keys, _chain, settings = pilot
+    health = c.get("/health").json()
+    assert health["skr_mint"] == settings.skr_mint
+    assert health["skr_payout"] == "unavailable"
+    assert health["test_tokens"] is True
+    assert not any("usdc" in key for key in health)
+
+    bond(c, headers[0])
+    me = c.get("/me", headers=headers[0]).json()
+    stats = c.get("/judge/stats", headers=headers[0]).json()
+    assert me["bond_test_skr_units"] == settings.min_bond
+    assert me["skr_funded"] is True
+    assert me["staked_skr"] == stats["staked_skr"] == settings.min_bond
+    assert stats["base_skr"] == 20_000
+    assert stats["flat_skr"] == 5_000
+    assert stats["earned_skr"] == stats["settled_skr"] == 0
+    assert not any("usdc" in key for key in me | stats)
+    with app.state.database.transaction() as db:
+        actor = db.get(Actor, str(keys[0].pubkey()))
+        assert actor.usdc_funded is True
+        assert actor.staked_usdc == settings.min_bond
+
+
 def test_deposit_does_not_require_calibration(pilot):
     c, _app, h, _keys, _chain, _s = pilot
     assert c.post("/bond/faucet", headers=h[0]).status_code == 200
@@ -199,9 +223,9 @@ def test_consensus_majority_pays_aligned(pilot):
     assert abs(body["agreement"] - 2 / 3) < 1e-6
 
     w0, w1, w2 = [str(k.pubkey()) for k in keys[:3]]
-    base = settings.judge_base_usdc
-    assert sorted(chain.settled_usdc) == sorted([(w0, base), (w1, base)])
-    assert all(w != w2 for w, _ in chain.settled_usdc)
+    base = settings.judge_base_skr
+    assert sorted(chain.settled_skr) == sorted([(w0, base), (w1, base)])
+    assert all(w != w2 for w, _ in chain.settled_skr)
 
 
 def test_cant_tell_reroutes_and_pays_flat(pilot):
@@ -217,7 +241,7 @@ def test_cant_tell_reroutes_and_pays_flat(pilot):
     assert r.json()["status"] == "rerouted"
     # The "can't tell" judge earned the flat rate; nobody was resolved as aligned.
     w2 = str(keys[2].pubkey())
-    assert (w2, settings.judge_flat_usdc) in chain.settled_usdc
+    assert (w2, settings.judge_flat_skr) in chain.settled_skr
 
 
 def test_tie_reroutes(pilot):
@@ -243,7 +267,7 @@ def test_rating_median_alignment(pilot):
     r = c.post(f"/judge/{pid}", headers=h[2], json={"rating": 2})
     assert r.json()["status"] == "resolved"
     w0, w1, w2 = [str(k.pubkey()) for k in keys[:3]]
-    assert sorted(chain.settled_usdc) == sorted([(w0, settings.judge_base_usdc), (w1, settings.judge_base_usdc)])
+    assert sorted(chain.settled_skr) == sorted([(w0, settings.judge_base_skr), (w1, settings.judge_base_skr)])
 
 
 # ---- agreement-floor slash trigger ----
@@ -334,7 +358,7 @@ def test_tie_vote_is_neutral_not_dissent(pilot):
         assert a.judged_count == 0
         assert a.agreement_rate == 0.0
     # No judge was paid for the unresolved pair.
-    assert _chain.settled_usdc == []
+    assert _chain.settled_skr == []
 
 
 def test_calibration_correctness_hidden_mid_gate(pilot):
@@ -351,7 +375,7 @@ def test_calibration_correctness_hidden_mid_gate(pilot):
 
 
 def test_payout_obligation_persisted_before_broadcast(pilot):
-    """A failed settle must leave the earned_usdc obligation journaled (settling
+    """A failed settle must leave the earned_skr obligation journaled (settling
     flag) so a retry reconciles it, not re-creates it (finding #1)."""
     c, app, h, keys, chain, settings = pilot
     ids = seed_calibration(app, settings.calibration_n)
@@ -367,7 +391,7 @@ def test_payout_obligation_persisted_before_broadcast(pilot):
             raise ChainUnavailable("boom")
         return str(Keypair().sign_message(b"ok"))
 
-    chain.settle_usdc = flaky_settle
+    chain.settle_skr = flaky_settle
     c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
     c.post(f"/judge/{pid}", headers=h[1], json={"choice": "a"})
     r = c.post(f"/judge/{pid}", headers=h[2], json={"choice": "b"})
@@ -381,4 +405,4 @@ def test_payout_obligation_persisted_before_broadcast(pilot):
             if j.settling
         ]
         assert len(settling) >= 1
-        assert settling[0].earned_usdc == settings.judge_base_usdc
+        assert settling[0].earned_usdc == settings.judge_base_skr

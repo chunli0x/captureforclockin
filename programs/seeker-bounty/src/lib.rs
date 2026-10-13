@@ -26,11 +26,11 @@ pub mod seeker_bounty {
                 && slash_authority != Pubkey::default(),
             Error::Invalid
         );
-        require!(ctx.accounts.usdc_mint.decimals == 6, Error::Invalid);
+        require!(ctx.accounts.skr_mint.decimals == 6, Error::Invalid);
         ctx.accounts.config.set_inner(Config {
             admin: ctx.accounts.admin.key(),
             verifier,
-            usdc_mint: ctx.accounts.usdc_mint.key(),
+            skr_mint: ctx.accounts.skr_mint.key(),
             min_bond,
             slash_authority,
         });
@@ -173,7 +173,7 @@ pub mod seeker_bounty {
         Ok(())
     }
 
-    /// Record a payment id so a settle_usdc retry is idempotent (finding D).
+    /// Record a payment id so a settle_skr retry is idempotent (finding D).
     /// The mint authority records the id BEFORE minting; a retry whose payment
     /// account already exists must skip the mint. Append-only via `init`.
     pub fn record_payment(
@@ -219,7 +219,7 @@ pub fn valid_merkle_root(root: [u8; 32]) -> bool {
 pub struct Config {
     pub admin: Pubkey,
     pub verifier: Pubkey,
-    pub usdc_mint: Pubkey,
+    pub skr_mint: Pubkey,
     pub min_bond: u64,
     pub slash_authority: Pubkey,
 }
@@ -252,8 +252,8 @@ pub struct Initialize<'info> {
     pub admin: Signer<'info>,
     #[account(init, payer=admin, space=8+Config::INIT_SPACE, seeds=[b"config"], bump)]
     pub config: Account<'info, Config>,
-    pub usdc_mint: Account<'info, Mint>,
-    #[account(init, payer=admin, seeds=[b"penalty-vault", usdc_mint.key().as_ref()], bump, token::mint=usdc_mint, token::authority=config)]
+    pub skr_mint: Account<'info, Mint>,
+    #[account(init, payer=admin, seeds=[b"penalty-vault", skr_mint.key().as_ref()], bump, token::mint=skr_mint, token::authority=config)]
     pub penalty_vault: Account<'info, TokenAccount>,
     #[account(constraint=program.programdata_address()? == Some(program_data.key()) @ Error::Unauthorized)]
     pub program: Program<'info, crate::program::SeekerBounty>,
@@ -268,14 +268,14 @@ pub struct Initialize<'info> {
 pub struct DepositBond<'info> {
     #[account(mut)]
     pub worker: Signer<'info>,
-    #[account(seeds=[b"config"], bump, has_one=usdc_mint)]
+    #[account(seeds=[b"config"], bump, has_one=skr_mint)]
     pub config: Account<'info, Config>,
-    pub usdc_mint: Account<'info, Mint>,
+    pub skr_mint: Account<'info, Mint>,
     #[account(init_if_needed, payer=worker, space=8+Bond::INIT_SPACE, seeds=[b"bond", worker.key().as_ref()], bump)]
     pub bond: Account<'info, Bond>,
-    #[account(init_if_needed, payer=worker, seeds=[b"bond-vault", worker.key().as_ref(), usdc_mint.key().as_ref()], bump, token::mint=usdc_mint, token::authority=bond)]
+    #[account(init_if_needed, payer=worker, seeds=[b"bond-vault", worker.key().as_ref(), skr_mint.key().as_ref()], bump, token::mint=skr_mint, token::authority=bond)]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, token::mint=usdc_mint, token::authority=worker)]
+    #[account(mut, token::mint=skr_mint, token::authority=worker)]
     pub source: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -285,14 +285,14 @@ pub struct DepositBond<'info> {
 #[derive(Accounts)]
 pub struct WithdrawBond<'info> {
     pub worker: Signer<'info>,
-    #[account(seeds=[b"config"], bump, has_one=usdc_mint)]
+    #[account(seeds=[b"config"], bump, has_one=skr_mint)]
     pub config: Account<'info, Config>,
-    pub usdc_mint: Account<'info, Mint>,
+    pub skr_mint: Account<'info, Mint>,
     #[account(seeds=[b"bond", worker.key().as_ref()], bump, has_one=worker)]
     pub bond: Account<'info, Bond>,
-    #[account(mut, seeds=[b"bond-vault", worker.key().as_ref(), usdc_mint.key().as_ref()], bump, token::mint=usdc_mint, token::authority=bond)]
+    #[account(mut, seeds=[b"bond-vault", worker.key().as_ref(), skr_mint.key().as_ref()], bump, token::mint=skr_mint, token::authority=bond)]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, token::mint=usdc_mint, token::authority=worker)]
+    #[account(mut, token::mint=skr_mint, token::authority=worker)]
     pub destination: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
 }
@@ -337,9 +337,9 @@ pub struct Slash<'info> {
     pub config: Account<'info, Config>,
     #[account(mut, seeds=[b"bond", worker.as_ref()], bump)]
     pub bond: Account<'info, Bond>,
-    #[account(mut, seeds=[b"bond-vault", worker.as_ref(), config.usdc_mint.as_ref()], bump, token::mint=config.usdc_mint, token::authority=bond)]
+    #[account(mut, seeds=[b"bond-vault", worker.as_ref(), config.skr_mint.as_ref()], bump, token::mint=config.skr_mint, token::authority=bond)]
     pub bond_vault: Account<'info, TokenAccount>,
-    #[account(mut, seeds=[b"penalty-vault", config.usdc_mint.as_ref()], bump, token::mint=config.usdc_mint, token::authority=config)]
+    #[account(mut, seeds=[b"penalty-vault", config.skr_mint.as_ref()], bump, token::mint=config.skr_mint, token::authority=config)]
     pub penalty_vault: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
 }

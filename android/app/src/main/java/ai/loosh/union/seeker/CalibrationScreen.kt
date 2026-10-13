@@ -94,7 +94,7 @@ private fun CalibrationAppBar(onBack: () -> Unit) {
             )
         }
         Text(
-            "DEVNET · TEST USDC",
+            "DEVNET · TEST \$SKR",
             style = MaterialTheme.typography.labelSmall,
             color = CaptureInk,
             textAlign = TextAlign.Center,
@@ -195,7 +195,7 @@ private fun ExampleCards(s: PilotState) {
         CapturePanel(Modifier.fillMaxWidth(), elevated = true) {
             TopicHeading(3, "Can't tell", CaptureSymbol.QUESTION_BUBBLE, CaptureCoral)
             Text(
-                "Always an option. Pays $${formatPayUsdc(s.judgeFlatUsdc)} and reroutes the pair.",
+                "Always an option. Pays ${formatPaySkr(s.judgeFlatSkr)} \$SKR and reroutes the pair.",
                 style = MaterialTheme.typography.bodyLarge, color = CaptureInk,
             )
         }
@@ -253,21 +253,21 @@ private fun PayCard(s: PilotState) {
         PayRow(CaptureSymbol.COINS, "Aligned judgment")
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                "$${formatPayUsdc(s.judgeBaseUsdc)} × ${String.format(Locale.US, "%.2f", s.judgeRateMultiplier)} = " +
-                    "$${formatPayUsdc((s.judgeBaseUsdc * s.judgeRateMultiplier).toLong())}",
+                "${formatPaySkr(s.judgeBaseSkr)} × ${String.format(Locale.US, "%.2f", s.judgeRateMultiplier)} = " +
+                    "${formatPaySkr((s.judgeBaseSkr * s.judgeRateMultiplier).toLong())}",
                 style = MaterialTheme.typography.headlineMedium, color = CaptureInk,
             )
-            Text("USDC", style = MaterialTheme.typography.labelMedium, color = CaptureInk)
+            Text("\$SKR", style = MaterialTheme.typography.labelMedium, color = CaptureInk)
         }
         Text(
             "Multiplier applies to aligned judgments: ×1.00 = base pay; ×2.00 = double.",
             style = MaterialTheme.typography.bodyMedium, color = CaptureInk,
         )
         HorizontalDivider(color = CaptureInk)
-        PayRow(CaptureSymbol.SCALES, "Disagreement pays $0")
-        PayRow(CaptureSymbol.QUESTION_BUBBLE, "\"Can't tell\": $${formatPayUsdc(s.judgeFlatUsdc)} flat", CaptureCoral)
+        PayRow(CaptureSymbol.SCALES, "Disagreement pays 0 \$SKR")
+        PayRow(CaptureSymbol.QUESTION_BUBBLE, "\"Can't tell\": ${formatPaySkr(s.judgeFlatSkr)} \$SKR flat", CaptureCoral)
         HorizontalDivider(color = CaptureInk)
-        PayRow(CaptureSymbol.INFO, "Paid in test USDC on devnet — not real value.")
+        PayRow(CaptureSymbol.INFO, "Paid in test \$SKR on devnet, not real value.")
     }
 }
 
@@ -287,7 +287,7 @@ private fun StandingCard(s: PilotState) {
             Metric("Level", s.judgeLevelName, Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Metric("Earned", "${formatToken(s.judgeEarnedUsdc)} USDC", Modifier.weight(1f))
+            Metric("Earned", "${formatToken(s.judgeEarnedSkr)} \$SKR", Modifier.weight(1f))
             Metric("Warnings", "${s.judgeWarnings}", Modifier.weight(1f))
         }
     }
