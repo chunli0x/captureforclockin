@@ -23,6 +23,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
+import kotlinx.coroutines.delay
 
 /**
  * The judgment product app: sign in, stake, judge, and earn test $SKR for
@@ -40,6 +42,16 @@ import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
  */
 @Composable
 fun SeekerApp(sender: ActivityResultSender, vm: SeekerViewModel = viewModel()) {
+    var showTitle by rememberSaveable { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        delay(1_500)
+        showTitle = false
+    }
+    if (showTitle) {
+        TitleScreen()
+        return
+    }
+
     val s by vm.state.collectAsState()
     var showBond by remember { mutableStateOf(false) }
     var showBalances by remember { mutableStateOf(false) }
