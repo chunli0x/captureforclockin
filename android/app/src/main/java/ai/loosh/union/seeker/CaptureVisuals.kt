@@ -114,7 +114,7 @@ fun CaptureWordmark() {
 }
 
 /** Small, consistent line icons drawn as vectors, with accessible labels at call sites. */
-enum class CaptureSymbol { CAMERA, GALLERY, PERSON, RING, BOLT, STREAK, EXPLORE, ROUTE, VERIFIED, TARGET, BRANCH, LOCK, SURFACE, LIGHT, WEATHER, MOTION, OBJECT, PLACE, VIDEO, EYE, STARS, QUESTION_BUBBLE, FILMSTRIP, COINS, SCALES, INFO, ARROW_LEFT, ARROW_RIGHT, ARROW_DOWN, CLOCK, WALLET }
+enum class CaptureSymbol { CAMERA_OFF, DOCUMENT_CHECK, CAMERA, GALLERY, PERSON, RING, BOLT, STREAK, EXPLORE, ROUTE, VERIFIED, TARGET, BRANCH, LOCK, SURFACE, LIGHT, WEATHER, MOTION, OBJECT, PLACE, VIDEO, EYE, STARS, QUESTION_BUBBLE, FILMSTRIP, COINS, SCALES, INFO, ARROW_LEFT, ARROW_RIGHT, ARROW_DOWN, CLOCK, WALLET }
 
 @Composable
 fun CaptureIcon(symbol: CaptureSymbol, modifier: Modifier = Modifier, tint: Color = CaptureAccent, description: String? = null) {
@@ -128,6 +128,16 @@ fun CaptureIcon(symbol: CaptureSymbol, modifier: Modifier = Modifier, tint: Colo
         }
         when(symbol) {
             CaptureSymbol.CAMERA -> { path(3f,7f,7f,7f,9f,4f,15f,4f,17f,7f,21f,7f,21f,20f,3f,20f,3f,7f); circle(12f,13f,4f) }
+            CaptureSymbol.CAMERA_OFF -> {
+                path(3f,7f,7f,7f,9f,4f,15f,4f,17f,7f,21f,7f,21f,20f,3f,20f,3f,7f)
+                circle(12f,13f,4f)
+                line(2f,2f,22f,22f)
+            }
+            CaptureSymbol.DOCUMENT_CHECK -> {
+                path(5f,2f,14f,2f,20f,8f,20f,22f,5f,22f,5f,2f)
+                path(14f,2f,14f,8f,20f,8f)
+                path(8f,15f,11f,18f,17f,12f)
+            }
             CaptureSymbol.GALLERY -> { path(5f,3f,21f,3f,21f,19f,5f,19f,5f,3f); path(2f,7f,2f,22f,17f,22f); path(5f,16f,10f,11f,14f,15f,17f,12f,21f,16f); circle(16f,7f,1f) }
             CaptureSymbol.PERSON -> { circle(12f,7f,4f); path(4f,21f,4f,18f,7f,14f,17f,14f,20f,18f,20f,21f) }
             CaptureSymbol.BOLT -> path(14f,2f,5f,14f,11f,14f,10f,22f,20f,9f,13f,9f,14f,2f)
@@ -243,6 +253,7 @@ fun FloatingBottomBar(profile: Boolean, enabled: Boolean, onGallery: () -> Unit,
 fun ActionButton(
     label: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     containerColor: Color = CaptureAction, contentColor: Color = Color.White,
+    labelStyle: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.titleMedium,
 ) {
     val haptic = LocalHapticFeedback.current
     Button(onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onClick() },
@@ -253,7 +264,7 @@ fun ActionButton(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
         colors = ButtonDefaults.buttonColors(containerColor = containerColor, contentColor = contentColor,
             disabledContainerColor = ButtonGrey, disabledContentColor = ButtonGreyInk)) {
-        Text(label, style = MaterialTheme.typography.titleMedium)
+        Text(label, style = labelStyle)
     }
 }
 

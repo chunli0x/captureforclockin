@@ -2,6 +2,7 @@ package ai.loosh.union
 
 import android.Manifest
 import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -10,16 +11,26 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import ai.loosh.union.seeker.ActionButton
+import ai.loosh.union.seeker.CaptureIcon
+import ai.loosh.union.seeker.CapturePanel
+import ai.loosh.union.seeker.CaptureSymbol
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -32,9 +43,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
@@ -55,8 +70,8 @@ import java.util.concurrent.Executors
  * which holds every decision worth testing. Nothing here uploads an image, and
  * nothing here keeps one - frames are closed as soon as they are analysed.
  *
- * The permission is requested when this screen opens rather than at launch, so
- * the system prompt appears with the explanation already on screen.
+ * The intro appears before any camera work. Only Begin check requests camera
+ * permission and enters the existing on-device motion check.
  */
 @Composable
 fun LivenessScreen(
@@ -70,78 +85,170 @@ fun LivenessScreen(
 
     val challenge = remember(challengeWire) { LivenessChallenge.fromWire(challengeWire) }
 
+    var started by rememberSaveable(challengeWire) { mutableStateOf(false) }
     var granted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    var denied by remember { mutableStateOf(false) }
+    var denied by rememberSaveable(challengeWire) { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { result ->
         granted = result
         denied = !result
+        started = result
     }
-    LaunchedEffect(Unit) {
-        if (!granted) permissionLauncher.launch(Manifest.permission.CAMERA)
-    }
+    BackHandler(onBack = onCancel)
+    val scrollState = rememberScrollState()
+    LaunchedEffect(started) { scrollState.scrollTo(0) }
 
+    // SeekerApp's Scaffold supplies the system insets. Scroll so large text and
+    // small screens keep every action reachable without shrinking the artwork.
     Column(
-        Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        Modifier.fillMaxSize().background(CaptureBase)
+            .verticalScroll(scrollState).padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("Are you human?", style = MaterialTheme.typography.headlineSmall)
+        TextButton(
+            onClick = onCancel,
+            modifier = Modifier.align(Alignment.Start)
+                .heightIn(min = CaptureDimensions.primaryButtonMinHeight),
+        ) {
+            CaptureIcon(CaptureSymbol.ARROW_LEFT, Modifier.size(20.dp), CaptureInk)
+            Text("Cancel", Modifier.padding(start = 8.dp), color = CaptureMutedText)
+        }
         Text(
-            "A quick on-device motion check (e.g. blink or turn your head). " +
-                "Images are processed on-device and not retained.",
-            style = MaterialTheme.typography.bodyMedium,
+            "ARE YOU HUMAN?",
+            style = MaterialTheme.typography.displayLarge,
+            color = CaptureInk,
+            textAlign = TextAlign.Center,
         )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "A quick motion check before you capture.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = CaptureMutedText,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(20.dp))
 
         if (challenge == null) {
-            // Fail closed: a challenge this build does not implement must not
-            // be treated as satisfied.
+            // Unknown challenges must never be treated as satisfied, even in demo.
             Text(
                 "This app doesn't know how to perform the challenge the server " +
                     "asked for ($challengeWire). Update the app and try again.",
                 style = MaterialTheme.typography.bodyMedium,
+                color = CaptureInk,
             )
-            TextButton(onClick = onCancel) { Text("Back") }
             return@Column
         }
 
-        when {
-            denied && !granted -> {
-                Text(
-                    "Camera access is needed for the liveness check. " +
-                        "You can grant it in Settings, then come back.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                TextButton(onClick = onCancel) { Text("Back") }
-            }
-
-            !granted -> Text("Waiting for camera permission…")
-
-            else -> LivenessCamera(
+        if (started && granted) {
+            LivenessCamera(
                 challenge = challenge,
                 lifecycleOwner = lifecycleOwner,
                 onPassed = onPassed,
                 modifier = Modifier.fillMaxWidth().aspectRatio(0.75f),
             )
+        } else {
+            LivenessPreCheck()
+            if (denied) {
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "Camera access is needed for the motion check. Try Begin check again, " +
+                        "or allow camera access in Settings.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = CaptureInk,
+                    textAlign = TextAlign.Center,
+                )
+            }
+            Spacer(Modifier.height(24.dp))
+            ActionButton(
+                label = "Begin check",
+                labelStyle = MaterialTheme.typography.titleLarge.copy(fontFamily = Anton),
+                onClick = {
+                    // Recheck after returning from Settings; never open the camera
+                    // simply because permission was granted on a previous visit.
+                    granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED
+                    if (granted) {
+                        denied = false
+                        started = true
+                    } else {
+                        permissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                },
+            )
         }
 
         Spacer(Modifier.height(8.dp))
-        busy?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-        TextButton(onClick = onCancel) { Text("Cancel") }
-        Button(
+        TextButton(
+            modifier = Modifier.heightIn(min = CaptureDimensions.primaryButtonMinHeight),
             onClick = {
-                // Demo pass: complete the liveness session without the motion
-                // check. The proof-of-human gate stays real in the code; this
-                // button keeps the demo flowing.
+                // Nonzero 32-byte demo digest accepted by the session API.
+                // This escape hatch deliberately works without camera permission.
                 onPassed("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
             },
-            enabled = challenge != null && granted,
-        ) { Text("Continue (demo)") }
+        ) {
+            Text("Continue (demo)", style = MaterialTheme.typography.bodyMedium, color = CaptureMutedText)
+        }
+        busy?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = CaptureMutedText)
+            Spacer(Modifier.height(8.dp))
+        }
+        Text(
+            "Images are processed on-device and not retained.",
+            style = MaterialTheme.typography.bodySmall,
+            color = CaptureMutedText,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun LivenessPreCheck() {
+    val hero = painterResource(R.drawable.liveness_hero)
+    Image(
+        painter = hero,
+        contentDescription = null,
+        modifier = Modifier.fillMaxWidth()
+            .aspectRatio(hero.intrinsicSize.width / hero.intrinsicSize.height),
+        contentScale = ContentScale.Fit,
+    )
+    Spacer(Modifier.height(20.dp))
+    Text(
+        "Look at the camera and blink to confirm human",
+        style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+        color = CaptureInk,
+        textAlign = TextAlign.Center,
+    )
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Follow the on-screen motion prompt.",
+        style = MaterialTheme.typography.bodyLarge,
+        color = CaptureMutedText,
+        textAlign = TextAlign.Center,
+    )
+    Spacer(Modifier.height(20.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LivenessInfoRow(CaptureSymbol.VERIFIED, "Motion is checked on your device.")
+        LivenessInfoRow(CaptureSymbol.CAMERA_OFF, "Camera images aren't saved or uploaded.")
+        LivenessInfoRow(CaptureSymbol.DOCUMENT_CHECK, "Your completion status is recorded.")
+    }
+}
+
+@Composable
+private fun LivenessInfoRow(symbol: CaptureSymbol, text: String) {
+    CapturePanel(Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            CaptureIcon(symbol, Modifier.size(24.dp), tint = CaptureInk)
+            Text(text, style = MaterialTheme.typography.bodyMedium, color = CaptureInk)
+        }
     }
 }
 
