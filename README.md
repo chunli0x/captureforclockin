@@ -26,6 +26,14 @@ Consensus-gated pay makes farming unprofitable. A random tapper agrees with the 
 
 $SKR does three jobs: stake, reward, slash. One token. Payout and bond use the same token, so the loop is closed and self-funding.
 
+## Deployment (devnet)
+
+- Program: `5TiDwP86k95yfQWzExrPTj5qcKxED99z8pW9fN81u5SV`
+- $SKR mint (test, 6 decimals): `3aGKaVL7GpcTcTuKjkyirnVeyNG1JGFNyGGueu8mAGbM`
+- Treasury ($SKR mint authority): `4S7W4BJvxHu26cWZdw9cmrKRLDDpzQV2BGNo783NG8zS`
+
+Tests: 47 backend (44 pass, 3 skip on this box), 60 Android, 6 Anchor. APK: 46.5 MB arm64 debug build.
+
 ## Status
 
 Everything runs on **devnet test $SKR**, not real value. The app and the health endpoint both say so.
