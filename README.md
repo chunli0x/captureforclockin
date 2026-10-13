@@ -48,7 +48,7 @@ Honest notes:
 
 The Solana Seeker client ships as a debug APK (devnet build, test tokens only). The same flows are available in the web app.
 
-## Screenshots
+## App Design
 
 | Judge | Calibrate | Standing | Balances |
 |---|---|---|---|
