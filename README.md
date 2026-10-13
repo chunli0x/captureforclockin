@@ -1,6 +1,6 @@
 # Capture
 
-**Humans judge a vision model's outputs. Consensus decides who gets paid. $SKR on Solana.**
+**Humans judge model outputs. Consensus decides who gets paid in $SKR on Solana. Create a human verified data set for training robot vision.**
 
 Capture is a decentralized RLHF platform for the Solana Seeker mobile. Contributors stake a $SKR bond, judge a vision model's outputs, and earn $SKR only when their judgment agrees with the crowd. Dissenters earn nothing, and systematic bad faith costs the bond. The result is an RLHF preference dataset with on-chain provenance, produced without a labeling firm and without guessing.
 
