@@ -15,8 +15,8 @@ android {
         applicationId = "ai.loosh.union"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0-spike"
+        versionCode = 2
+        versionName = "0.2.0"
 
         // Point this at your machine's LAN IP when running the backend locally;
         // the Seeker cannot reach your laptop's localhost. Override without
@@ -24,6 +24,12 @@ android {
         val seekerBase = (project.findProperty("seekerApiBase") as String?) ?: "http://10.0.2.2:8001"
         require(!seekerBase.contains('"') && !seekerBase.contains('\n'))
         buildConfigField("String", "SEEKER_API_BASE", "\"$seekerBase\"")
+
+        // Ship a single-ABI debug APK (arm64) so the installer doesn't choke on
+        // a large multi-arch bundle. The Seeker and every modern phone are arm64.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     androidResources {
