@@ -1,0 +1,6 @@
+# Copy to signing.properties (ignored); reuse and back up the same keystore.
+# Relative paths are resolved against android/.
+storeFile=release.jks
+storePassword=REPLACE_ME
+keyAlias=capture
+keyPassword=REPLACE_ME

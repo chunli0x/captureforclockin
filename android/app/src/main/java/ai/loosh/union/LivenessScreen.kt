@@ -269,6 +269,7 @@ private fun LivenessCamera(
     val classifier = remember { SpoofClassifier.createOrNull(context) }
     DisposableEffect(classifier) { onDispose { classifier?.close() } }
     val fusion = remember(challenge) { LivenessFusion() }
+    var fusionAttempt = remember(challenge) { fusion.attempt }
     var spoofSuspected by remember { mutableStateOf(false) }
 
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -282,6 +283,7 @@ private fun LivenessCamera(
                 // than fine landmark geometry.
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+                .enableTracking()
                 .build()
         )
     }
@@ -315,6 +317,10 @@ private fun LivenessCamera(
                     analysis.setAnalyzer(
                         analysisExecutor,
                         faceAnalyzer(faceDetector, classifier, fusion) { sample ->
+                            if (fusionAttempt != fusion.attempt) {
+                                detector.reset()
+                                fusionAttempt = fusion.attempt
+                            }
                             val phase = detector.accept(sample)
                             val outcome = fusion.outcome(phase == LivenessPhase.PASSED)
                             detector.recordPassiveCheck(outcome, classifier != null)
@@ -372,9 +378,8 @@ private fun LivenessCamera(
  * until the proxy is closed; the completion listener closes it on every path,
  * success or failure.
  *
- * A frame that fails to analyse is a dropped frame, not a failed challenge -
- * it reports no sample rather than a missing face, so a transient decode error
- * cannot reset someone's progress.
+ * Missing/ambiguous faces or failed analysis reset the motion attempt and its
+ * passive evidence together. Face tracking also prevents evidence transfer.
  */
 @androidx.annotation.OptIn(ExperimentalGetImage::class)
 private fun faceAnalyzer(
@@ -382,46 +387,58 @@ private fun faceAnalyzer(
     classifier: SpoofClassifier?,
     fusion: LivenessFusion,
     onSample: (FaceSample?) -> Unit,
-) = ImageAnalysis.Analyzer { proxy ->
-    val media = proxy.image
-    if (media == null) {
-        proxy.close()
-        return@Analyzer
-    }
-    faceDetector.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
-        .addOnSuccessListener { faces ->
-            val face = faces.firstOrNull()
-            if (face != null && classifier != null) {
-                // Best effort: a frame we cannot crop or score is simply not
-                // evidence either way, never counted as a spoof.
-                runCatching {
-                    proxy.toBitmap()?.let { frame ->
-                        val box = FaceBox(
-                            face.boundingBox.left, face.boundingBox.top,
-                            face.boundingBox.right, face.boundingBox.bottom,
-                        )
-                        val crop = spoofCropRect(box, frame.width, frame.height)
-                        val cropped = Bitmap.createBitmap(
-                            frame, crop.left, crop.top,
-                            crop.width.coerceAtLeast(1), crop.height.coerceAtLeast(1),
-                        )
-                        val scaled = Bitmap.createScaledBitmap(
-                            cropped, SpoofModel.INPUT_SIDE, SpoofModel.INPUT_SIDE, true
-                        )
-                        classifier.classify(scaled)?.let(fusion::observe)
+): ImageAnalysis.Analyzer {
+    var trackedFace: Int? = null
+    return ImageAnalysis.Analyzer { proxy ->
+        val media = proxy.image
+        if (media == null) {
+            fusion.reset()
+            onSample(null)
+            proxy.close()
+            return@Analyzer
+        }
+        faceDetector.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
+            .addOnSuccessListener { faces ->
+                val face = faces.singleOrNull()
+                if (face == null || face.trackingId == null || trackedFace != face.trackingId) fusion.reset()
+                trackedFace = face?.trackingId
+                var verdict: SpoofVerdict? = null
+                if (face != null && classifier != null) {
+                    // A failed crop/score breaks continuity; it cannot retain live evidence.
+                    runCatching {
+                        proxy.toBitmap().let { frame ->
+                            val box = FaceBox(
+                                face.boundingBox.left, face.boundingBox.top,
+                                face.boundingBox.right, face.boundingBox.bottom,
+                            )
+                            val crop = spoofCropRect(box, frame.width, frame.height)
+                            val cropped = Bitmap.createBitmap(
+                                frame, crop.left, crop.top,
+                                crop.width.coerceAtLeast(1), crop.height.coerceAtLeast(1),
+                            )
+                            val scaled = Bitmap.createScaledBitmap(
+                                cropped, SpoofModel.INPUT_SIDE, SpoofModel.INPUT_SIDE, true
+                            )
+                            verdict = classifier.classify(scaled)
+                        }
                     }
                 }
+                if (classifier != null) fusion.observe(verdict)
+                onSample(
+                    face?.takeIf { classifier == null || verdict?.live == true }?.let {
+                        FaceSample(
+                            leftEyeOpen = it.leftEyeOpenProbability,
+                            rightEyeOpen = it.rightEyeOpenProbability,
+                            headYawDeg = it.headEulerAngleY,
+                            smiling = it.smilingProbability,
+                        )
+                    }
+                )
             }
-            onSample(
-                face?.let {
-                    FaceSample(
-                        leftEyeOpen = it.leftEyeOpenProbability,
-                        rightEyeOpen = it.rightEyeOpenProbability,
-                        headYawDeg = it.headEulerAngleY,
-                        smiling = it.smilingProbability,
-                    )
-                }
-            )
-        }
-        .addOnCompleteListener { proxy.close() }
+            .addOnFailureListener {
+                fusion.reset()
+                onSample(null)
+            }
+            .addOnCompleteListener { proxy.close() }
+    }
 }

@@ -91,12 +91,12 @@ class LivenessDetectorTest {
     }
 
     @Test
-    fun `a pass survives the face leaving the frame`() {
+    fun `provisional motion pass is reset when face leaves`() {
         val detector = LivenessDetector(LivenessChallenge.BLINK)
         detector.hold(face(eyes = 0.95f))
         detector.hold(face(eyes = 0.05f))
         detector.hold(face(eyes = 0.95f))
-        assertEquals(LivenessPhase.PASSED, detector.hold(null, frames = 10))
+        assertEquals(LivenessPhase.NO_FACE, detector.hold(null, frames = 10))
     }
 
     @Test

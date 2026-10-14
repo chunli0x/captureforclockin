@@ -181,27 +181,56 @@ enum class LivenessOutcome { PENDING, PASSED, SPOOF_SUSPECTED }
  * cheap - hold a real face up for an instant mid-replay - so the classifier's
  * verdict is taken over the frames during which the motion actually happened.
  */
-class LivenessFusion(private val minLiveFrames: Int = 5) {
+class LivenessFusion(
+    private val minLiveFrames: Int = 5,
+    private val maxGapMs: Long = 750,
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000 },
+) {
     private var liveFrames = 0
     private var spoofFrames = 0
+    private var lastFrameMs: Long? = null
+    var attempt: Long = 0
+        private set
 
-    fun observe(verdict: SpoofVerdict) {
-        if (verdict.live) liveFrames++ else spoofFrames++
+    init {
+        require(minLiveFrames > 0 && maxGapMs > 0)
     }
 
-    val sawEnoughLiveFrames: Boolean get() = liveFrames >= minLiveFrames
+    fun reset() {
+        liveFrames = 0
+        spoofFrames = 0
+        lastFrameMs = null
+        attempt++
+    }
 
-    /**
-     * True when the classifier has seen more spoof frames than live ones and
-     * enough of them to mean something. Reported separately from "not yet
-     * passed" so the UI can say *why* rather than silently never succeeding.
-     */
-    val spoofSuspected: Boolean
-        get() = spoofFrames >= minLiveFrames && spoofFrames > liveFrames
+    val expired: Boolean
+        get() = lastFrameMs?.let { clockMs() - it > maxGapMs } ?: false
+
+    fun observe(verdict: SpoofVerdict?) {
+        if (verdict == null) {
+            reset()
+            return
+        }
+        if (expired) reset()
+        lastFrameMs = clockMs()
+        if (verdict.live) {
+            liveFrames++
+        } else {
+            liveFrames = 0
+            spoofFrames++
+            attempt++ // motion must restart with the next continuous live run
+        }
+    }
+
+    val sawEnoughLiveFrames: Boolean get() = !expired && liveFrames >= minLiveFrames
+
+    // Rejection is latched for this motion attempt. A new face/attempt resets
+    // both checks; a few live frames cannot erase sustained spoof evidence.
+    val spoofSuspected: Boolean get() = spoofFrames >= minLiveFrames
 
     fun outcome(motionPassed: Boolean): LivenessOutcome = when {
-        motionPassed && sawEnoughLiveFrames -> LivenessOutcome.PASSED
         spoofSuspected -> LivenessOutcome.SPOOF_SUSPECTED
+        motionPassed && sawEnoughLiveFrames -> LivenessOutcome.PASSED
         else -> LivenessOutcome.PENDING
     }
 }

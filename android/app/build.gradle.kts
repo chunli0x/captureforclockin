@@ -1,10 +1,65 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.net.URI
+import java.net.InetAddress
+import java.util.Properties
+import javax.net.ssl.HttpsURLConnection
 
 plugins {
     // AGP 9 has built-in Kotlin support, so org.jetbrains.kotlin.android must
     // NOT be applied - AGP fails the build if it is.
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+val releaseSecrets = Properties().apply {
+    val source = rootProject.file("signing.properties")
+    if (source.isFile) source.inputStream().use { load(it) }
+}
+fun releaseValue(name: String, env: String): String? =
+    providers.environmentVariable(env).orNull ?: releaseSecrets.getProperty(name)
+
+val apiBase = providers.gradleProperty("seekerApiBase")
+    .orElse(providers.environmentVariable("SEEKER_API_BASE")).orNull
+val releaseStore = releaseValue("storeFile", "SEEKER_KEYSTORE_FILE")?.let { rootProject.file(it) }
+val releaseStorePassword = releaseValue("storePassword", "SEEKER_KEYSTORE_PASSWORD")
+val releaseKeyAlias = releaseValue("keyAlias", "SEEKER_KEY_ALIAS")
+val releaseKeyPassword = releaseValue("keyPassword", "SEEKER_KEY_PASSWORD")
+
+val validateReleaseDistribution = tasks.register("validateReleaseDistribution") {
+    group = "verification"
+    description = "Require a reachable HTTPS backend and persistent release signing credentials."
+    doLast {
+        require(!apiBase.isNullOrBlank()) { "Release requires -PseekerApiBase=https://your-backend or SEEKER_API_BASE" }
+        val uri = URI(apiBase)
+        require(uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.userInfo == null &&
+            uri.query == null && uri.fragment == null &&
+            uri.host.lowercase() !in setOf("localhost", "10.0.2.2", "127.0.0.1", "[::1]") &&
+            !uri.host.endsWith(".localhost")) { "Release backend must be a reachable HTTPS URL, not an emulator/loopback URL" }
+        require(releaseStore?.isFile == true && !releaseStorePassword.isNullOrBlank() &&
+            !releaseKeyAlias.isNullOrBlank() && !releaseKeyPassword.isNullOrBlank()) {
+            "Release requires a persistent keystore: configure android/signing.properties or SEEKER_KEYSTORE_* / SEEKER_KEY_*"
+        }
+        require(InetAddress.getAllByName(uri.host).none {
+            it.isAnyLocalAddress || it.isLoopbackAddress || it.isLinkLocalAddress
+        }) { "Release backend must be reachable from a physical device" }
+        val connection = URI(apiBase!!.trimEnd('/') + "/health").toURL().openConnection() as HttpsURLConnection
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 10_000
+        connection.instanceFollowRedirects = false
+        try {
+            require(connection.responseCode in 200..299) { "Release backend /health must return HTTP 2xx over HTTPS" }
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
+
+// Cover assemble, bundle, install and direct package/sign tasks, including
+// invocations such as `assemble` that request both debug and release variants.
+tasks.configureEach {
+    if (name.contains("Release") && name != "validateReleaseDistribution") {
+        dependsOn(validateReleaseDistribution)
+    }
 }
 
 android {
@@ -18,11 +73,8 @@ android {
         versionCode = 2
         versionName = "0.2.0"
 
-        // Point this at your machine's LAN IP when running the backend locally;
-        // the Seeker cannot reach your laptop's localhost. Override without
-        // editing the file: -PseekerApiBase=http://192.168.1.20:8000
-        val seekerBase = (project.findProperty("seekerApiBase") as String?) ?: "http://10.0.2.2:8001"
-        require(!seekerBase.contains('"') && !seekerBase.contains('\n'))
+        val seekerBase = apiBase ?: "http://10.0.2.2:8001"
+        require(seekerBase.none { it == '"' || it == '\\' || it.isISOControl() })
         buildConfigField("String", "SEEKER_API_BASE", "\"$seekerBase\"")
 
         // Ship a single-ABI debug APK (arm64) so the installer doesn't choke on
@@ -43,10 +95,19 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = releaseStore
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Release signing must be supplied by the release operator.
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -89,8 +150,6 @@ dependencies {
     implementation(libs.camerax.video)
     implementation(libs.mlkit.face.detection)
     implementation(libs.litert)
-    implementation(libs.androidx.media3.exoplayer)
-    implementation(libs.androidx.media3.ui)
 
     testImplementation(libs.junit)
 }

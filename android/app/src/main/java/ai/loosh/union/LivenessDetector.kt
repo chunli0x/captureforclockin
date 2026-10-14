@@ -137,17 +137,24 @@ class LivenessDetector(val challenge: LivenessChallenge) {
         }
     }
 
+    fun reset() {
+        phase = LivenessPhase.NO_FACE
+        holdCount = 0
+        framesSeen = 0
+        facesSeen = 0
+        extremeYaw = 0f
+        minEyeOpen = 1f
+        maxSmile = 0f
+        passiveCheck = "unavailable"
+    }
+
     /** Feed one frame. `null` means no face was detected. */
     fun accept(sample: FaceSample?): LivenessPhase {
         framesSeen++
 
         if (sample == null) {
-            // Losing the face resets everything but PASSED. A pass already
-            // earned is not revoked by the user lowering the phone.
-            if (phase != LivenessPhase.PASSED) {
-                phase = LivenessPhase.NO_FACE
-                holdCount = 0
-            }
+            // Until the fused check passes, a motion pass alone is provisional.
+            reset()
             return phase
         }
 

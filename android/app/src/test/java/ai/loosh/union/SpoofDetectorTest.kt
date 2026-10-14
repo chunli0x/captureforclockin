@@ -206,11 +206,13 @@ class SpoofDetectorTest {
     }
 
     @Test
-    fun `a mostly-live run with a few bad frames still passes`() {
-        // Real capture is noisy; one dark frame must not fail an honest user.
+    fun `bad frames invalidate historical live evidence`() {
+        // A continuous recent run must be earned again after a bad frame.
         val fusion = LivenessFusion(minLiveFrames = 5)
         repeat(20) { fusion.observe(live) }
         repeat(3) { fusion.observe(spoof) }
+        assertEquals(LivenessOutcome.PENDING, fusion.outcome(motionPassed = true))
+        repeat(5) { fusion.observe(live) }
         assertEquals(LivenessOutcome.PASSED, fusion.outcome(motionPassed = true))
     }
 
@@ -230,4 +232,46 @@ class SpoofDetectorTest {
         assertEquals(1, SpoofModel.LIVE_CLASS)
         assertEquals(2.7f, SpoofModel.CROP_SCALE, 1e-6f)
     }
+    @Test
+    fun `spoof dominates historical and subsequent live frames`() {
+        val fusion = LivenessFusion()
+        repeat(5) { fusion.observe(live) }
+        repeat(10) { fusion.observe(spoof) }
+        repeat(5) { fusion.observe(live) }
+        assertEquals(LivenessOutcome.SPOOF_SUSPECTED, fusion.outcome(true))
+    }
+
+    @Test
+    fun `lost face and missing classification reset evidence`() {
+        val fusion = LivenessFusion()
+        repeat(5) { fusion.observe(live) }
+        val attempt = fusion.attempt
+        fusion.observe(null)
+        assertTrue(fusion.attempt > attempt)
+        fusion.observe(live)
+        assertEquals(LivenessOutcome.PENDING, fusion.outcome(true))
+    }
+
+    @Test
+    fun `frame gap expires evidence and starts a new motion attempt`() {
+        var now = 0L
+        val fusion = LivenessFusion(clockMs = { now })
+        repeat(5) { fusion.observe(live) }
+        val attempt = fusion.attempt
+        now = 751
+        assertEquals(LivenessOutcome.PENDING, fusion.outcome(true))
+        fusion.observe(live)
+        assertTrue(fusion.attempt > attempt)
+        assertEquals(LivenessOutcome.PENDING, fusion.outcome(true))
+    }
+
+    @Test
+    fun `spoof frame restarts motion attempt`() {
+        val fusion = LivenessFusion()
+        fusion.observe(live)
+        val attempt = fusion.attempt
+        fusion.observe(spoof)
+        assertTrue(fusion.attempt > attempt)
+    }
+
 }

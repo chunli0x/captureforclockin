@@ -44,3 +44,8 @@ backend/.bootstrap-state.json
 
 backend/.venv/
 seed_images/
+
+# Persistent Android distribution signing credentials (operator-provided).
+android/signing.properties
+*.jks
+*.keystore
