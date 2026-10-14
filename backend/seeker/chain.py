@@ -334,6 +334,11 @@ class Chain:
             raise ChainUnavailable("$SKR treasury (mint authority) is not configured")
         worker = Pubkey.from_string(wallet)
         payer = self.treasury
+        # Global faucet budget: keep a SOL floor in the treasury for payouts,
+        # so a swarm of fresh wallets cannot drain the devnet funder.
+        treasury_sol = self.rpc("getBalance", [str(payer.pubkey())])["value"]
+        if treasury_sol - self.settings.faucet_sol_lamports < self.settings.faucet_treasury_sol_floor:
+            raise ChainUnavailable("test $SKR faucet SOL budget exhausted")
         instructions = [ata_instruction(payer.pubkey(), worker, self.skr)]
         instructions.append(
             mint_to(

@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # A wallet may tap the devnet test $SKR faucet this many times (each tap
     # mints min_bond test $SKR) before it is cut off.
     faucet_max_mints: int = Field(default=5, gt=0)
+    # Global faucet budget: keep at least this much SOL in the treasury for
+    # payouts. A tap is refused when it would drop the treasury below this
+    # floor, so a swarm of fresh wallets cannot drain the devnet funder.
+    faucet_treasury_sol_floor: int = Field(default=1_000_000_000, gt=0)
 
     # ---- Judgment product (RLHF preference judging) ----
     # Consensus-gated pay in test $SKR (6 decimals, not real value). All are starting

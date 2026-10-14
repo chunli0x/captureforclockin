@@ -27,6 +27,7 @@ def chain(tmp_path):
             rpc_url="http://127.0.0.1:8899",
             min_bond=1_000_000,
             faucet_sol_lamports=50_000_000,
+            faucet_treasury_sol_floor=1_000_000_000,
         )
     )
 
@@ -231,6 +232,9 @@ def test_faucet_and_settle_build_signed_instructions(chain, tmp_path):
         if method == "getSignatureStatuses":
             # confirm success so settle_skr's _confirm_sent passes
             return {"value": [{"err": None, "confirmationStatus": "finalized"}]}
+        if method == "getBalance":
+            # enough SOL to clear the faucet treasury floor check
+            return {"value": 10_000_000_000}
         raise AssertionError(f"unexpected rpc method: {method}")
 
     chain.rpc = fake_rpc
@@ -247,6 +251,24 @@ def test_faucet_and_settle_build_signed_instructions(chain, tmp_path):
     # instructions serialized without a Keypair/Pubkey type mismatch.
     sends = [c for c in sent if c[0] == "sendTransaction"]
     assert len(sends) == 2
+
+
+def test_faucet_refuses_when_below_sol_floor(chain, tmp_path):
+    # Global faucet budget: refuse a tap that would drop the treasury below
+    # the SOL floor, so a swarm of fresh wallets cannot drain the devnet funder.
+    treasury = Keypair()
+    p = tmp_path / "treasury.json"
+    p.write_text(json.dumps(list(bytes(treasury))))
+    chain.treasury = treasury
+
+    def fake_rpc(method, params):
+        if method == "getBalance":
+            return {"value": 500_000_000}  # below floor (1 SOL) + tap (0.05)
+        raise AssertionError(f"unexpected rpc method: {method}")
+
+    chain.rpc = fake_rpc
+    with pytest.raises(ChainUnavailable):
+        chain.faucet(str(Keypair().pubkey()))
 
 
 def test_payment_journal_failure_prevents_broadcast(chain, payer):
