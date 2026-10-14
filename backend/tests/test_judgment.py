@@ -186,7 +186,7 @@ def ready_judge(c, app, h, calib_ids):
 # ---- calibration gate ----
 
 
-def test_skr_wire_contract_keeps_legacy_storage(pilot):
+def test_skr_wire_contract_matches_storage(pilot):
     c, app, headers, keys, _chain, settings = pilot
     health = c.get("/health").json()
     assert health["skr_mint"] == settings.skr_mint
@@ -206,8 +206,8 @@ def test_skr_wire_contract_keeps_legacy_storage(pilot):
     assert not any("usdc" in key for key in me | stats)
     with app.state.database.transaction() as db:
         actor = db.get(Actor, str(keys[0].pubkey()))
-        assert actor.usdc_funded is True
-        assert actor.staked_usdc == settings.min_bond
+        assert actor.skr_funded is True
+        assert actor.staked_skr == settings.min_bond
 
 
 def test_deposit_does_not_require_calibration(pilot):
@@ -436,7 +436,7 @@ def test_payout_obligation_persisted_before_broadcast(pilot):
             if j.settling
         ]
         assert len(settling) >= 1
-        assert settling[0].earned_usdc == settings.judge_base_skr
+        assert settling[0].earned_skr == settings.judge_base_skr
 
 
 def test_direct_submission_requires_liveness_even_with_bond(pilot):
@@ -624,7 +624,7 @@ def test_second_resolution_slashes_once_and_slashed_judge_can_reconcile(pilot):
     wallet = str(keys[2].pubkey())
     with app.state.database.transaction() as db:
         actor = db.get(Actor, wallet)
-        assert actor.warnings == 2 and not actor.bonded and actor.staked_usdc == 0
+        assert actor.warnings == 2 and not actor.bonded and actor.staked_skr == 0
         assert actor.judged_count == 2
     assert c.post(f"/judge/{pid}", headers=h[2], json={"choice": "b"}).status_code == 200
     assert chain.issued.count(("warn", wallet, None)) == 2

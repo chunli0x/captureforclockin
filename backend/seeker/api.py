@@ -265,11 +265,11 @@ def create_app(settings: Settings, *, chain=None):
             "liveness_completed": actor.liveness_completed or not settings.liveness_required,
             "bond_test_skr_units": settings.min_bond,
             "bonded": actor.bonded,
-            "skr_funded": actor.usdc_funded,
+            "skr_funded": actor.skr_funded,
             "faucet_mints": actor.faucet_count,
             "faucet_max": settings.faucet_max_mints,
             "calibrated": actor.calibrated,
-            "staked_skr": actor.staked_usdc,
+            "staked_skr": actor.staked_skr,
             "warnings": actor.warnings,
             **level,
         }
@@ -344,7 +344,7 @@ def create_app(settings: Settings, *, chain=None):
                 chain.faucet(actor.wallet)
             except ChainUnavailable as exc:
                 fail(503, f"Test $SKR faucet unavailable: {exc}")
-            actor.usdc_funded = True
+            actor.skr_funded = True
             actor.faucet_count += 1
         return {
             "funded": True,
@@ -360,7 +360,7 @@ def create_app(settings: Settings, *, chain=None):
         message via /transactions/{id}/confirm."""
         with database.transaction() as db:
             actor = lock(db, Actor, actor.wallet)
-            if not actor.usdc_funded:
+            if not actor.skr_funded:
                 fail(409, "Get test $SKR first")
             return prepare(db, "deposit", actor.wallet, actor)
 
@@ -385,7 +385,7 @@ def create_app(settings: Settings, *, chain=None):
         with database.transaction() as db:
             actor = lock(db, Actor, actor.wallet)
             if action == "deposit":
-                if not actor.usdc_funded:
+                if not actor.skr_funded:
                     fail(409, "Get test $SKR first")
             else:
                 if not actor.bonded:
@@ -521,7 +521,7 @@ def create_app(settings: Settings, *, chain=None):
             .where(
                 Judgment.wallet == wallet,
                 Judgment.choice == "cant_tell",
-                Judgment.earned_usdc > 0,
+                Judgment.earned_skr > 0,
             )
         ) or 0
 
@@ -554,7 +554,7 @@ def create_app(settings: Settings, *, chain=None):
                         "signature": j.payout_pending_signature,
                         "last_valid_height": j.payout_last_valid_height}
         try:
-            sig = chain.settle_skr(j.wallet, j.earned_usdc, memo=j.judgment_id,
+            sig = chain.settle_skr(j.wallet, j.earned_skr, memo=j.judgment_id,
                                    persist=persist, prepared=prepared)
         except ChainUnavailable:
             return False
@@ -585,7 +585,7 @@ def create_app(settings: Settings, *, chain=None):
                 if warnings >= 2:
                     actor.bonded = False
                     actor.calibrated = False
-                    actor.staked_usdc = 0
+                    actor.staked_skr = 0
 
     def _maybe_anchor_batch(pair_id):
         """When a batch is fully resolved, compute its Merkle root and commit it
@@ -801,7 +801,7 @@ def create_app(settings: Settings, *, chain=None):
                         # Actor is locked, serializing the per-wallet cap.
                         earned = _flat_payments_recent(db, wallet, settings.judge_flat_cap)
                         if settings.judge_flat_cap == 0 or earned < settings.judge_flat_cap:
-                            j.earned_usdc = settings.judge_flat_skr
+                            j.earned_skr = settings.judge_flat_skr
                             j.settling = True
                 db.flush()
                 substantive = _substantive_judgments(db, pair_id, pair.task_type)
@@ -818,7 +818,7 @@ def create_app(settings: Settings, *, chain=None):
                         for vote in substantive:
                             vote.aligned = vote.wallet in aligned
                             if vote.aligned:
-                                vote.earned_usdc = payouts[vote.wallet]
+                                vote.earned_skr = payouts[vote.wallet]
                                 vote.settling = True
                         pair.status = "resolving"
                         pair.preference, pair.agreement, pair.confidence = winner, agreement, confidence
@@ -841,12 +841,12 @@ def create_app(settings: Settings, *, chain=None):
             level = judge_level_info(actor.agreement_rate)
             in_progress = (not actor.calibrated) and 0 < answered < settings.calibration_n
             earned = db.scalar(
-                select(func.coalesce(func.sum(Judgment.earned_usdc), 0)).where(
+                select(func.coalesce(func.sum(Judgment.earned_skr), 0)).where(
                     Judgment.wallet == actor.wallet
                 )
             )
             settled = db.scalar(
-                select(func.coalesce(func.sum(Judgment.earned_usdc), 0)).where(
+                select(func.coalesce(func.sum(Judgment.earned_skr), 0)).where(
                     Judgment.wallet == actor.wallet,
                     Judgment.payout_signature.is_not(None),
                 )
@@ -865,7 +865,7 @@ def create_app(settings: Settings, *, chain=None):
                 "rate_multiplier": level["rate_multiplier"],
                 "base_skr": settings.judge_base_skr,
                 "flat_skr": settings.judge_flat_skr,
-                "staked_skr": actor.staked_usdc,
+                "staked_skr": actor.staked_skr,
                 "warnings": actor.warnings,
                 "earned_skr": earned,
                 "settled_skr": settled,
@@ -978,11 +978,11 @@ def create_app(settings: Settings, *, chain=None):
             if p.action == "deposit":
                 worker = lock(db, Actor, p.wallet)
                 worker.bonded = True
-                worker.staked_usdc = settings.min_bond
+                worker.staked_skr = settings.min_bond
             elif p.action == "withdraw":
                 worker = lock(db, Actor, p.wallet)
                 worker.bonded = False
-                worker.staked_usdc = 0
+                worker.staked_skr = 0
             return tx_view(p)
 
     @app.post("/transactions/{pid}/confirm")

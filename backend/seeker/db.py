@@ -45,26 +45,25 @@ class Actor(Base):
     # Server-side liveness gate. Set once a wallet completes a server-issued
     # liveness session (see /liveness/complete). Proof-of-human, not bank-grade.
     liveness_completed: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Legacy *_usdc column names store test $SKR units; retained to avoid a migration.
     # Bond gate (all server-recorded): bonded == the devnet bond was deposited;
-    # usdc_funded == the devnet test $SKR faucet ran.
+    # skr_funded == the devnet test $SKR faucet ran.
     bonded: Mapped[bool] = mapped_column(Boolean, default=False)
-    usdc_funded: Mapped[bool] = mapped_column(Boolean, default=False)
+    skr_funded: Mapped[bool] = mapped_column(Boolean, default=False)
     # Number of times this wallet has tapped the devnet test $SKR faucet
-    # (capped at faucet_max_mints). usdc_funded stays as the "funded at least
+    # (capped at faucet_max_mints). skr_funded stays as the "funded at least
     # once" flag for the deposit gate.
     faucet_count: Mapped[int] = mapped_column(Integer, default=0)
     # ---- Judgment product (RLHF preference judging) ----
     # calibrated == passed the N-pair calibration gate (unpaid) and may stake +
     # judge. agreement_rate == rolling fraction of resolved judgments this judge
     # was aligned on (last judge_window). judged_count == resolved judgments
-    # participated in. staked_usdc == the SKR bond escrowed on deposit (mirror).
+    # participated in. staked_skr == the SKR bond escrowed on deposit (mirror).
     # warnings == mirror of the on-chain bond.warnings ladder (0 clean, 1 warned,
     # >= 2 slashed).
     calibrated: Mapped[bool] = mapped_column(Boolean, default=False)
     agreement_rate: Mapped[float] = mapped_column(Float, default=0.0)
     judged_count: Mapped[int] = mapped_column(Integer, default=0)
-    staked_usdc: Mapped[int] = mapped_column(BigInteger, default=0)
+    staked_skr: Mapped[int] = mapped_column(BigInteger, default=0)
     warnings: Mapped[int] = mapped_column(Integer, default=0)
 
 
@@ -152,9 +151,9 @@ class Judgment(Base):
     # "cant_tell"/"tie" vote). Consumed judgments do not re-trigger a reroute
     # and are excluded from the final consensus denominator.
     consumed: Mapped[bool] = mapped_column(Boolean, default=False)
-    earned_usdc: Mapped[int] = mapped_column(BigInteger, default=0)
+    earned_skr: Mapped[int] = mapped_column(BigInteger, default=0)
     payout_signature: Mapped[str | None] = mapped_column(String(88))
-    # settling == the earned_usdc obligation was committed to the ledger but its
+    # settling == the earned_skr obligation was committed to the ledger but its
     # mint transaction has not yet been confirmed on-chain. Payout obligations
     # are persisted BEFORE broadcast so a partial payout can never be lost or
     # double-paid (finding 10 #1); cleared once the mint confirms.
