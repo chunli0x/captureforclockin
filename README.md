@@ -32,7 +32,7 @@ $SKR does three jobs: stake, reward, slash. One token. Payout and bond use the s
 - TEST $SKR mint: `3aGKaVL7GpcTcTuKjkyirnVeyNG1JGFNyGGueu8mAGbM`
 - TEST Treasury (TEST $SKR mint authority): `4S7W4BJvxHu26cWZdw9cmrKRLDDpzQV2BGNo783NG8zS`
 
-Tests: 47 backend (44 pass, 3 skip on this box), 60 Android, 6 Anchor. APK: 46.5 MB arm64 debug build.
+Tests: 63 backend, 7 Anchor, 64 Android. APK: 46.5 MB arm64 debug build.
 
 ## Status
 
