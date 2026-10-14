@@ -21,6 +21,10 @@ class FakeChain:
         self.issued = []       # (action, wallet, amount) from issue
         self.posted = []       # (batch_id, root) from post_batch
         self.warnings = 0
+        self.worker_warnings = {}
+        self.reservations = set()
+        self.resolutions = {}
+        self.payments = {}
 
     def height(self):
         return 10
@@ -36,7 +40,7 @@ class FakeChain:
         return str(Keypair().sign_message(p.id.encode()))
 
     def bond_warnings(self, wallet):
-        return self.warnings
+        return self.worker_warnings.get(wallet, self.warnings)
 
     def bond_vault_balance(self, wallet):
         return 1_000_000  # >= min_bond; test judges are assumed bonded
@@ -45,12 +49,33 @@ class FakeChain:
         self.issued.append((action, wallet, amount))
         return str(Keypair().sign_message(f"issue-{len(self.issued)}".encode()))
 
-    def settle_skr(self, wallet, amount):
-        return str(Keypair().sign_message(b"skr"))
+    def reserve_judgment(self, wallet, resolution_id):
+        assert resolution_id not in self.resolutions
+        self.reservations.add((wallet, resolution_id))
 
-    def settle_skr(self, wallet, amount, memo=None):
-        self.settled_skr.append((wallet, amount))
-        return str(Keypair().sign_message(f"skr-{len(self.settled_skr)}".encode()))
+    def resolve_judgment(self, wallet, resolution_id, penalize):
+        if resolution_id not in self.resolutions:
+            self.resolutions[resolution_id] = penalize
+            warnings = self.bond_warnings(wallet)
+            if penalize and warnings < 2:
+                self.issued.append(("warn", wallet, None))
+                warnings += 1
+                if warnings == 2:
+                    self.issued.append(("slash", wallet, None))
+                    warnings = 255
+            self.worker_warnings[wallet] = warnings
+            self.reservations.discard((wallet, resolution_id))
+        else:
+            assert self.resolutions[resolution_id] == penalize
+        return self.bond_warnings(wallet)
+
+    def settle_skr(self, wallet, amount, memo=None, *, persist, prepared=None):
+        if memo not in self.payments:
+            sig = str(Keypair().sign_message(memo.encode()))
+            persist({"transaction": "SIGNED-TEST-TX", "signature": sig, "last_valid_height": 100})
+            self.payments[memo] = sig
+            self.settled_skr.append((wallet, amount))
+        return self.payments[memo]
 
     def faucet(self, wallet):
         return str(Keypair().sign_message(b"faucet"))
@@ -150,6 +175,12 @@ def bond(c, h):
 def ready_judge(c, app, h, calib_ids):
     calibrate(c, h, calib_ids, correct=10)
     bond(c, h)
+    wallet = c.get("/me", headers=h).json()["wallet"]
+    session = c.post("/liveness/session", headers=h, json={"contributor": wallet, "task_id": "capture-session"}).json()
+    response = c.post("/liveness/complete", headers=h, json={
+        "contributor": wallet, "session_id": session["session_id"], "result_digest": "ab" * 32,
+    })
+    assert response.status_code == 200, response.text
 
 
 # ---- calibration gate ----
@@ -385,7 +416,7 @@ def test_payout_obligation_persisted_before_broadcast(pilot):
 
     calls = {"n": 0}
 
-    def flaky_settle(wallet, amount, memo=None):
+    def flaky_settle(wallet, amount, memo=None, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             raise ChainUnavailable("boom")
@@ -406,3 +437,195 @@ def test_payout_obligation_persisted_before_broadcast(pilot):
         ]
         assert len(settling) >= 1
         assert settling[0].earned_usdc == settings.judge_base_skr
+
+
+def test_direct_submission_requires_liveness_even_with_bond(pilot):
+    c, app, h, keys, chain, settings = pilot
+    bond(c, h[0])
+    pid = seed_pair(app, k=1)
+    response = c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
+    assert response.status_code == 403
+    assert "human" in response.json()["detail"]
+    with app.state.database.transaction() as db:
+        assert db.query(Judgment).count() == 0
+    assert not chain.reservations and not chain.settled_skr
+    settings.liveness_required = False
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 200
+
+
+def test_retry_after_mint_confirmation_loss_does_not_deadlock_or_double_pay(pilot):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    bond(c, h[0])
+    pid = seed_pair(app, k=1)
+    original = chain.settle_skr
+
+    def lost_confirmation(wallet, amount, memo, **kwargs):
+        signature = original(wallet, amount, memo, **kwargs)
+        with app.state.database.transaction() as db:
+            j = db.get(Judgment, memo)
+            assert j.payout_pending_signature == signature
+            assert j.payout_transaction == "SIGNED-TEST-TX"
+            assert j.settling and j.payout_signature is None
+        raise ChainUnavailable("confirmation lost after successful mint")
+
+    chain.settle_skr = lost_confirmation
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 503
+    assert len(chain.settled_skr) == 1
+    chain.settle_skr = original
+    # SQLite BEGIN IMMEDIATE would self-deadlock here with the old retry path.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(c.post, f"/judge/{pid}", headers=h[0], json={"choice": "a"}) for _ in range(2)]
+        assert all(f.result(timeout=5).status_code == 200 for f in results)
+    assert len(chain.settled_skr) == 1
+    with app.state.database.transaction() as db:
+        assert db.get(JudgmentPair, pid).status == "resolved"
+        assert db.get(Actor, str(keys[0].pubkey())).judged_count == 1
+        j = db.query(Judgment).one()
+        assert not j.settling and j.enforcement_complete
+    assert not chain.reservations
+
+
+def test_enforcement_failure_is_durable_and_concurrent_retries_warn_once(pilot):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    settings.judge_slash_min_judged = 1
+    for hd in h[:3]:
+        bond(c, hd)
+    pid = seed_pair(app)
+    original = chain.resolve_judgment
+
+    def lose_confirmation(wallet, rid, penalize):
+        result = original(wallet, rid, penalize)
+        if penalize:
+            raise ChainUnavailable("warning landed but confirmation lost")
+        return result
+
+    chain.resolve_judgment = lose_confirmation
+    for i, choice in enumerate(("a", "a", "b")):
+        r = c.post(f"/judge/{pid}", headers=h[i], json={"choice": choice})
+    assert r.status_code == 503
+    with app.state.database.transaction() as db:
+        assert db.get(JudgmentPair, pid).status == "enforcing"
+        penalty = db.query(Judgment).filter_by(enforcement_penalty=True).one()
+        assert penalty.enforcement_requested and not penalty.enforcement_complete
+    chain.resolve_judgment = original
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        replies = [pool.submit(c.post, f"/judge/{pid}", headers=h[2], json={"choice": "b"}) for _ in range(2)]
+        assert all(f.result(timeout=5).status_code == 200 for f in replies)
+    wallet = str(keys[2].pubkey())
+    assert chain.issued.count(("warn", wallet, None)) == 1
+    with app.state.database.transaction() as db:
+        actor = db.get(Actor, wallet)
+        assert actor.warnings == 1 and actor.judged_count == 1
+        assert db.get(JudgmentPair, pid).status == "resolved"
+
+
+def test_reservation_unknown_result_retries_same_durable_id(pilot):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    bond(c, h[0])
+    pid = seed_pair(app)
+    original = chain.reserve_judgment
+
+    def lost_confirmation(wallet, rid):
+        original(wallet, rid)
+        raise ChainUnavailable("reserve landed but response lost")
+
+    chain.reserve_judgment = lost_confirmation
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 503
+    with app.state.database.transaction() as db:
+        row = db.query(Judgment).one()
+        rid = row.judgment_id
+        assert not row.liability_reserved
+        assert db.get(JudgmentPair, pid).status == "open"
+    chain.reserve_judgment = original
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 200
+    assert chain.reservations == {(str(keys[0].pubkey()), rid)}
+
+
+def test_neutral_payout_and_release_retry(pilot):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    bond(c, h[0])
+    pid = seed_pair(app)
+    original = chain.resolve_judgment
+    chain.resolve_judgment = lambda *args: (_ for _ in ()).throw(ChainUnavailable("offline"))
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "cant_tell"}).status_code == 503
+    chain.resolve_judgment = original
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "cant_tell"}).status_code == 200
+    assert len(chain.settled_skr) == 1 and not chain.reservations
+
+
+def test_migration_preserves_legacy_votes_and_reserves_before_consensus(pilot):
+    from seeker.migrate import apply_migrations
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    for hd in h[:2]:
+        bond(c, hd)
+    pid = seed_pair(app, k=2)
+    with app.state.database.transaction() as db:
+        db.add(Judgment(pair_id=pid, wallet=str(keys[0].pubkey()), choice="a"))
+        db.get(JudgmentPair, pid).status = "collecting"
+    # Emulate an accepted pre-upgrade judgment, then apply the migration twice.
+    with app.state.database.engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE judgments DROP COLUMN liability_legacy")
+    assert apply_migrations(app.state.database.engine) == 1
+    assert apply_migrations(app.state.database.engine) == 0
+    with app.state.database.transaction() as db:
+        assert db.query(Judgment).one().liability_legacy
+    response = c.post(f"/judge/{pid}", headers=h[1], json={"choice": "a"})
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "resolved"
+    assert len(chain.settled_skr) == 2
+    with app.state.database.transaction() as db:
+        assert all(j.liability_reserved and not j.liability_legacy for j in db.query(Judgment).all())
+        assert db.get(Actor, str(keys[0].pubkey())).judged_count == 1
+
+
+def test_abandoned_unconfirmed_submission_is_cancelled_at_resolution(pilot):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    for hd in h[:3]:
+        bond(c, hd)
+    pid = seed_pair(app, k=2)
+    original = chain.reserve_judgment
+
+    def lost_confirmation(wallet, rid):
+        original(wallet, rid)
+        raise ChainUnavailable("reservation may have landed")
+
+    chain.reserve_judgment = lost_confirmation
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "b"}).status_code == 503
+    chain.reserve_judgment = original
+    for hd in h[1:3]:
+        response = c.post(f"/judge/{pid}", headers=hd, json={"choice": "a"})
+    assert response.json()["status"] == "resolved"
+    assert not chain.reservations
+    with app.state.database.transaction() as db:
+        j = db.query(Judgment).filter_by(wallet=str(keys[0].pubkey())).one()
+        assert j.consumed and j.enforcement_complete and not j.enforcement_penalty
+        assert db.get(Actor, j.wallet).judged_count == 0
+
+
+def test_second_resolution_slashes_once_and_slashed_judge_can_reconcile(pilot):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    settings.judge_slash_min_judged = 1
+    for hd in h[:3]:
+        bond(c, hd)
+    for _ in range(2):
+        pid = seed_pair(app)
+        for i, choice in enumerate(("a", "a", "b")):
+            response = c.post(f"/judge/{pid}", headers=h[i], json={"choice": choice})
+        assert response.status_code == 200, response.text
+    wallet = str(keys[2].pubkey())
+    with app.state.database.transaction() as db:
+        actor = db.get(Actor, wallet)
+        assert actor.warnings == 2 and not actor.bonded and actor.staked_usdc == 0
+        assert actor.judged_count == 2
+    assert c.post(f"/judge/{pid}", headers=h[2], json={"choice": "b"}).status_code == 200
+    assert chain.issued.count(("warn", wallet, None)) == 2
+    assert chain.issued.count(("slash", wallet, None)) == 1

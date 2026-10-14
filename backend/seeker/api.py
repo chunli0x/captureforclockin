@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .chain import Chain, ChainUnavailable
 from .config import Settings
+from .liabilities import reserve_legacy
 from .db import (
     Actor,
     CalibrationAnswer,
@@ -531,7 +532,8 @@ def create_app(settings: Settings, *, chain=None):
         the quorum (finding #8)."""
         rows = db.scalars(
             select(Judgment).where(
-                Judgment.pair_id == pair_id, Judgment.consumed.is_(False)
+                Judgment.pair_id == pair_id, Judgment.consumed.is_(False),
+                Judgment.liability_reserved.is_(True),
             )
         ).all()
         if task_type == "rating":
@@ -539,22 +541,51 @@ def create_app(settings: Settings, *, chain=None):
         return [j for j in rows if j.choice in ("a", "b")]
 
     def _settle_judgment_obligation(j, pair_id):
-        """Mint ``j.earned_usdc`` to ``j.wallet`` and confirm it, then clear the
-        settling flag. Idempotent: the memo is the judgment_id, so a retry of
-        the same obligation produces a distinct transaction from any other
-        obligation (finding #3), and a successful confirm clears settling so the
-        next reconciliation does not re-mint (finding #1). Returns True on
-        settle, False on a transport failure (obligation stays settling=True)."""
+        def persist(prepared):
+            with database.transaction() as db:
+                row = lock(db, Judgment, j.judgment_id)
+                row.payout_transaction = prepared["transaction"]
+                row.payout_pending_signature = prepared["signature"]
+                row.payout_last_valid_height = prepared["last_valid_height"]
+
+        prepared = None
+        if j.payout_transaction:
+            prepared = {"transaction": j.payout_transaction,
+                        "signature": j.payout_pending_signature,
+                        "last_valid_height": j.payout_last_valid_height}
         try:
-            sig = chain.settle_skr(j.wallet, j.earned_usdc, memo=j.judgment_id)
+            sig = chain.settle_skr(j.wallet, j.earned_usdc, memo=j.judgment_id,
+                                   persist=persist, prepared=prepared)
         except ChainUnavailable:
             return False
         with database.transaction() as db:
-            row = db.get(Judgment, j.judgment_id)
-            if row is not None:
-                row.payout_signature = sig
-                row.settling = False
+            row = lock(db, Judgment, j.judgment_id)
+            row.payout_signature = sig
+            row.settling = False
         return True
+
+    def _process_enforcement(pair_id):
+        with database.transaction() as db:
+            ids = list(db.scalars(select(Judgment.judgment_id).where(
+                Judgment.pair_id == pair_id, Judgment.enforcement_requested.is_(True),
+                Judgment.enforcement_complete.is_(False),
+            )))
+        for jid in ids:
+            # Serialize local mirrors per worker; on-chain resolution receipts
+            # protect against retries after commit/confirmation failure too.
+            with database.transaction() as db:
+                wallet = db.get(Judgment, jid).wallet
+                actor = lock(db, Actor, wallet)
+                j = lock(db, Judgment, jid)
+                if j.enforcement_complete:
+                    continue
+                warnings = chain.resolve_judgment(j.wallet, jid, j.enforcement_penalty)
+                j.enforcement_complete = True
+                actor.warnings = min(warnings, 2)
+                if warnings >= 2:
+                    actor.bonded = False
+                    actor.calibrated = False
+                    actor.staked_usdc = 0
 
     def _maybe_anchor_batch(pair_id):
         """When a batch is fully resolved, compute its Merkle root and commit it
@@ -567,7 +598,7 @@ def create_app(settings: Settings, *, chain=None):
             if pair is None or pair.batch_id is None:
                 return
             batch = db.get(JudgmentBatch, pair.batch_id)
-            if batch is None:
+            if batch is None or batch.anchored:
                 return
             unresolved = db.scalar(
                 select(func.count())
@@ -605,47 +636,6 @@ def create_app(settings: Settings, *, chain=None):
             b = db.get(JudgmentBatch, anchor[0])
             if b is not None:
                 b.anchored = True
-
-    def _enforce_agreement_slash(wallet):
-        """Two-strike warn/slash for systematic disagreement (agreement rate
-        below the floor). Idempotent via the on-chain bond.warnings counter and
-        the Actor.warnings mirror."""
-        try:
-            warnings = chain.bond_warnings(wallet)
-        except ChainUnavailable:
-            return
-        if warnings == 0:
-            try:
-                chain.issue("warn", wallet)
-            except ChainUnavailable:
-                return
-            with database.transaction() as db:
-                a = lock(db, Actor, wallet)
-                a.warnings = 1
-        else:
-            try:
-                if warnings < 2:
-                    chain.issue("warn", wallet)
-                chain.issue("slash", wallet)
-            except ChainUnavailable:
-                return
-            with database.transaction() as db:
-                a = lock(db, Actor, wallet)
-                a.warnings = 2
-                a.bonded = False
-                a.calibrated = False
-                a.staked_usdc = 0
-
-    def _maybe_slash_agreement_farmers(judges):
-        for wallet, _choice, _rating in judges:
-            with database.transaction() as db:
-                a = lock(db, Actor, wallet)
-                if a is None:
-                    continue
-                rate_, count = a.agreement_rate, a.judged_count
-            if count < settings.judge_slash_min_judged or rate_ >= settings.judge_slash_floor:
-                continue
-            _enforce_agreement_slash(wallet)
 
     @app.get("/judge/next")
     def judge_next(actor: Auth):
@@ -715,178 +705,133 @@ def create_app(settings: Settings, *, chain=None):
         return _calibration_status(actor, answered, ncorrect)
 
     def _settle_and_finalize(pair_id):
-        """Settle a resolved pair's pending payout obligations and finalize it.
-
-        Shared by the resolve path and the "resolving" reconciliation path so a
-        pair stuck mid-settlement after a partial failure is durably retried
-        instead of 409ing forever (finding #3). Reads the resolution from the
-        persisted pair columns (set before the first settlement attempt)."""
+        # All callers enter after committing their submission transaction.
         with database.transaction() as db:
             pair = lock(db, JudgmentPair, pair_id)
-            if pair.status == "resolved":
-                return {"status": "resolved", "preference": pair.preference}
             if pair.preference is None:
                 fail(409, "Pair is not yet resolved; retry shortly")
-            winner = pair.preference
-            agreement = pair.agreement
-            confidence = pair.confidence
-            judges = db.scalars(
-                select(Judgment).where(
-                    Judgment.pair_id == pair_id, Judgment.consumed.is_(False)
-                )
-            ).all()
-        with database.transaction() as db:
-            obligations = db.scalars(
-                select(Judgment).where(
-                    Judgment.pair_id == pair_id, Judgment.settling.is_(True)
-                )
-            ).all()
-        failed = []
-        for j in obligations:
-            if not _settle_judgment_obligation(j, pair_id):
-                failed.append(j.wallet)
-        if failed:
+            result = {"status": "resolved", "preference": pair.preference,
+                      "agreement": pair.agreement, "confidence": pair.confidence}
+            obligations = db.scalars(select(Judgment).where(
+                Judgment.pair_id == pair_id, Judgment.settling.is_(True),
+            )).all()
+        settled = [_settle_judgment_obligation(j, pair_id) for j in obligations]
+        if not all(settled):
             fail(503, "$SKR payout pending for some judges; retry to reconcile")
         with database.transaction() as db:
             pair = lock(db, JudgmentPair, pair_id)
-            if pair.status != "resolved":
-                pair.status = "resolved"
-                for j in db.scalars(
-                    select(Judgment).where(
-                        Judgment.pair_id == pair_id, Judgment.consumed.is_(False)
-                    )
-                ).all():
-                    a = lock(db, Actor, j.wallet)
-                    if a is not None:
-                        a.judged_count += 1
-                        a.agreement_rate = rolling_agreement(db, j.wallet)
+            if pair.status == "resolving":
+                # Statistics and enforcement decisions commit together, once.
+                # Keep the pair non-final until enforcement has actually landed.
+                pair.status = "enforcing"
+                judges = db.scalars(select(Judgment).where(
+                    Judgment.pair_id == pair_id,
+                ).order_by(Judgment.wallet)).all()
+                for j in judges:
+                    if not j.liability_reserved:
+                        j.consumed = True  # cancel an interrupted submission
+                    if not j.consumed:
+                        actor = lock(db, Actor, j.wallet)
+                        actor.judged_count += 1
+                        actor.agreement_rate = rolling_agreement(db, j.wallet)
+                        j.enforcement_penalty = (
+                            actor.judged_count >= settings.judge_slash_min_judged
+                            and actor.agreement_rate < settings.judge_slash_floor
+                        )
+                    j.enforcement_requested = True
+        _process_enforcement(pair_id)
+        with database.transaction() as db:
+            pair = lock(db, JudgmentPair, pair_id)
+            pair.status = "resolved"
         _maybe_anchor_batch(pair_id)
-        _maybe_slash_agreement_farmers(
-            [(j.wallet, j.choice, j.rating) for j in judges]
-        )
-        return {
-            "status": "resolved",
-            "preference": winner,
-            "agreement": agreement,
-            "confidence": confidence,
-        }
+        return result
 
     def _submit_judgment(pair_id, body, wallet):
-        claim = None
+        # Persist the immutable submission ID before reserving collateral. A
+        # failed/unknown reservation is retryable, and cannot count in quorum.
         with database.transaction() as db:
-            actor = lock(db, Actor, wallet)
-            if not actor.bonded:
-                fail(403, "Deposit the SKR bond to judge")
             pair = lock(db, JudgmentPair, pair_id)
-            if pair.status == "resolved":
-                return {"status": "resolved", "preference": pair.preference}
-            if pair.status == "resolving":
-                # Reconciliation (finding #3): re-run settlement + finalize
-                # instead of 409ing forever after a partial payout failure.
-                return _settle_and_finalize(pair_id)
-            # Finding #4: the local `actor.bonded` is a callback-maintained mirror.
-            # A wallet that withdrew its bond on-chain (bypassing the backend
-            # confirm endpoint) would otherwise keep judging with an empty,
-            # unslashable vault. Re-verify the on-chain bond is live before every
-            # judgment: `bond_warnings` raises if the bond account is gone.
-            try:
-                if chain.bond_warnings(wallet) >= 2:
-                    fail(403, "Bond is slashed; deposit a fresh SKR bond to judge")
-                if chain.bond_vault_balance(wallet) < settings.min_bond:
-                    fail(403, "Bond vault is empty; deposit the SKR bond to judge")
-            except ChainUnavailable:
-                fail(403, "Bond is not active on-chain; deposit the SKR bond to judge")
-            choice, rating = _validate_against_task(pair.task_type, body)
-            existing = db.scalar(
-                select(Judgment).where(
-                    Judgment.pair_id == pair_id, Judgment.wallet == wallet
-                )
-            )
-            if existing:
-                fail(409, "You already judged this pair")
-            db.add(Judgment(pair_id=pair_id, wallet=wallet, choice=choice, rating=rating))
-            db.flush()
-            substantive = _substantive_judgments(db, pair_id, pair.task_type)
-            if len(substantive) < pair.k:
-                if pair.status == "open":
-                    pair.status = "collecting"
-                if choice in ("cant_tell", "tie") or (pair.task_type == "rating" and rating is None):
-                    jj = db.scalar(
-                        select(Judgment).where(
-                            Judgment.pair_id == pair_id, Judgment.wallet == wallet
-                        )
-                    )
-                    jj.consumed = True
-                    claim = {"type": "neutral", "flat": [wallet] if choice == "cant_tell" else []}
-                else:
-                    return {"status": "submitted"}
+            actor = lock(db, Actor, wallet)
+            if settings.liveness_required and not actor.liveness_completed:
+                fail(403, "Prove you're human before judging")
+            existing = db.scalar(select(Judgment).where(
+                Judgment.pair_id == pair_id, Judgment.wallet == wallet,
+            ))
+            # A participant can reconcile even if this resolution slashed them.
+            if not actor.bonded and existing is None:
+                fail(403, "Deposit the SKR bond to judge")
+            if pair.status != "resolved":
+                reserve_legacy(db, chain, pair_id)
+            reconcile = pair.status in ("resolving", "enforcing", "resolved")
+            if not reconcile:
+                choice, rating = _validate_against_task(pair.task_type, body)
+                if existing is None:
+                    try:
+                        if chain.bond_warnings(wallet) >= 2:
+                            fail(403, "Bond is slashed; deposit a fresh SKR bond to judge")
+                        if chain.bond_vault_balance(wallet) < settings.min_bond:
+                            fail(403, "Bond vault is empty; deposit the SKR bond to judge")
+                    except ChainUnavailable:
+                        fail(403, "Bond is not active on-chain; deposit the SKR bond to judge")
+                    existing = Judgment(pair_id=pair_id, wallet=wallet, choice=choice, rating=rating)
+                    db.add(existing)
+                    db.flush()
+                elif (existing.choice, existing.rating) != (choice, rating):
+                    fail(409, "You already judged this pair")
+        if reconcile:
+            return _settle_and_finalize(pair_id)
+
+        with database.transaction() as db:
+            pair = lock(db, JudgmentPair, pair_id)
+            lock(db, Actor, wallet)
+            j = db.scalar(select(Judgment).where(Judgment.pair_id == pair_id, Judgment.wallet == wallet))
+            if pair.status in ("resolving", "enforcing", "resolved"):
+                reconcile = True
             else:
-                js = db.scalars(
-                    select(Judgment).where(
-                        Judgment.pair_id == pair_id, Judgment.consumed.is_(False)
-                    )
-                ).all()
-                resolution = _resolve(pair, js)
-                reason = resolution[0] if isinstance(resolution[0], str) else None
-                if reason == "neutral":
-                    for j in js:
-                        if j.choice in ("cant_tell", "tie") or (pair.task_type == "rating" and j.rating is None):
-                            j.consumed = True
-                    pair.status = "collecting"
-                    claim = {"type": "neutral", "flat": [j.wallet for j in js if j.choice == "cant_tell"]}
-                elif reason == "tie":
-                    pair.status = "rerouted"
-                    pair.k += 1
-                    claim = {"type": "tie"}
-                else:
-                    winner, aligned, agreement, confidence = resolution
-                    payouts = []
-                    for w in aligned:
-                        lvl = judge_level_for(rolling_agreement(db, w))
-                        payouts.append((w, int(settings.judge_base_skr * judge_rate_multiplier(lvl))))
-                    payout_map = dict(payouts)
-                    for j in db.scalars(
-                        select(Judgment).where(
-                            Judgment.pair_id == pair_id, Judgment.consumed.is_(False)
-                        )
-                    ).all():
-                        j.aligned = j.wallet in aligned
-                        if j.aligned:
-                            j.earned_usdc = payout_map[j.wallet]
+                if not j.liability_reserved:
+                    # The program checks balance and increments pending in the
+                    # same atomic operation, closing the withdraw/check race.
+                    chain.reserve_judgment(wallet, j.judgment_id)
+                    j.liability_reserved = True
+                neutral = j.choice in ("cant_tell", "tie") or (pair.task_type == "rating" and j.rating is None)
+                if neutral and not j.consumed:
+                    j.consumed = True
+                    j.enforcement_requested = True
+                    if j.choice == "cant_tell":
+                        # Actor is locked, serializing the per-wallet cap.
+                        earned = _flat_payments_recent(db, wallet, settings.judge_flat_cap)
+                        if settings.judge_flat_cap == 0 or earned < settings.judge_flat_cap:
+                            j.earned_usdc = settings.judge_flat_skr
                             j.settling = True
-                    pair.status = "resolving"
-                    pair.preference = winner
-                    pair.agreement = agreement
-                    pair.confidence = confidence
-                    claim = {
-                        "type": "resolve",
-                        "winner": winner,
-                        "aligned": aligned,
-                        "agreement": agreement,
-                        "confidence": confidence,
-                        "payouts": payouts,
-                        "judges": [(j.wallet, j.choice, j.rating) for j in js],
-                    }
-        if claim["type"] == "neutral":
-            for w in claim["flat"]:
-                j = None
-                with database.transaction() as db:
-                    j = db.scalar(
-                        select(Judgment).where(Judgment.pair_id == pair_id, Judgment.wallet == w)
-                    )
-                    if j is not None and not j.settling:
-                        earned = _flat_payments_recent(db, w, settings.judge_flat_cap)
-                        if settings.judge_flat_cap > 0 and earned >= settings.judge_flat_cap:
-                            j.consumed = True
-                            continue
-                        j.earned_usdc = settings.judge_flat_skr
-                        j.settling = True
-                if j is not None and j.settling:
-                    _settle_judgment_obligation(j, pair_id)
-            return {"status": "rerouted"}
-        if claim["type"] == "tie":
-            return {"status": "rerouted"}
-        return _settle_and_finalize(pair_id)
+                db.flush()
+                substantive = _substantive_judgments(db, pair_id, pair.task_type)
+                if len(substantive) >= pair.k:
+                    winner, aligned, agreement, confidence = _resolve(pair, substantive)
+                    if winner == "tie":
+                        pair.status = "rerouted"
+                        pair.k += 1
+                    else:
+                        payouts = {
+                            w: int(settings.judge_base_skr * judge_rate_multiplier(judge_level_for(rolling_agreement(db, w))))
+                            for w in aligned
+                        }
+                        for vote in substantive:
+                            vote.aligned = vote.wallet in aligned
+                            if vote.aligned:
+                                vote.earned_usdc = payouts[vote.wallet]
+                                vote.settling = True
+                        pair.status = "resolving"
+                        pair.preference, pair.agreement, pair.confidence = winner, agreement, confidence
+                        reconcile = True
+                elif pair.status == "open":
+                    pair.status = "collecting"
+                status = "rerouted" if neutral or pair.status == "rerouted" else "submitted"
+        if reconcile:
+            return _settle_and_finalize(pair_id)
+        if j.settling and not _settle_judgment_obligation(j, pair_id):
+            fail(503, "$SKR payout pending; retry to reconcile")
+        _process_enforcement(pair_id)
+        return {"status": status}
 
     @app.get("/judge/stats")
     def judge_stats(actor: Auth):

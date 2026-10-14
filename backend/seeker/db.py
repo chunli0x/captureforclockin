@@ -159,6 +159,15 @@ class Judgment(Base):
     # are persisted BEFORE broadcast so a partial payout can never be lost or
     # double-paid (finding 10 #1); cleared once the mint confirms.
     settling: Mapped[bool] = mapped_column(Boolean, default=False)
+    # judgment_id is also the unique, immutable on-chain resolution ID.
+    liability_legacy: Mapped[bool] = mapped_column(Boolean, default=False)
+    liability_reserved: Mapped[bool] = mapped_column(Boolean, default=False)
+    enforcement_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    enforcement_penalty: Mapped[bool] = mapped_column(Boolean, default=False)
+    enforcement_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    payout_transaction: Mapped[str | None] = mapped_column(String(4096))
+    payout_pending_signature: Mapped[str | None] = mapped_column(String(88))
+    payout_last_valid_height: Mapped[int | None] = mapped_column(BigInteger)
     submitted_at: Mapped[int] = mapped_column(BigInteger, default=now)
 
 

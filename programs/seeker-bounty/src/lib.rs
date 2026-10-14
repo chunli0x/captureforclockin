@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, Transfer};
 
 // Development identity only. Deploy with your own keypair and update all clients.
 declare_id!("5TiDwP86k95yfQWzExrPTj5qcKxED99z8pW9fN81u5SV");
@@ -21,9 +21,7 @@ pub mod seeker_bounty {
         min_bond: u64,
     ) -> Result<()> {
         require!(
-            min_bond > 0
-                && verifier != Pubkey::default()
-                && slash_authority != Pubkey::default(),
+            min_bond > 0 && verifier != Pubkey::default() && slash_authority != Pubkey::default(),
             Error::Invalid
         );
         require!(ctx.accounts.skr_mint.decimals == 6, Error::Invalid);
@@ -53,8 +51,8 @@ pub mod seeker_bounty {
         // slashable but not yet slashed; resetting it there would let a worker
         // dodge the slash with a one-base-unit deposit (finding #5).
         if bond.warnings == TERMINAL_WARNINGS {
+            require!(bond.pending == 0, Error::Pending);
             bond.warnings = 0;
-            bond.pending = 0;
         }
         bond.unlock_at = Clock::get()?
             .unix_timestamp
@@ -173,20 +171,128 @@ pub mod seeker_bounty {
         Ok(())
     }
 
-    /// Record a payment id so a settle_skr retry is idempotent (finding D).
-    /// The mint authority records the id BEFORE minting; a retry whose payment
-    /// account already exists must skip the mint. Append-only via `init`.
+    /// The receipt and mint are atomic: a receipt proves the exact payment.
     pub fn record_payment(
         ctx: Context<RecordPayment>,
         payment_id: [u8; 16],
+        recipient: Pubkey,
+        amount: u64,
     ) -> Result<()> {
-        require!(payment_id != [0u8; 16], Error::Invalid);
-        ctx.accounts
-            .payment
-            .set_inner(Payment {
-                mint_authority: ctx.accounts.mint_authority.key(),
-            });
+        require!(payment_id != [0u8; 16] && amount > 0, Error::Invalid);
+        token::mint_to(
+            CpiContext::new(
+                ctx.accounts.token_program.key(),
+                MintTo {
+                    mint: ctx.accounts.skr_mint.to_account_info(),
+                    to: ctx.accounts.destination.to_account_info(),
+                    authority: ctx.accounts.mint_authority.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+        ctx.accounts.payment.set_inner(Payment {
+            mint_authority: ctx.accounts.mint_authority.key(),
+            recipient,
+            mint: ctx.accounts.skr_mint.key(),
+            amount,
+            payment_id,
+        });
         Ok(())
+    }
+
+    /// One durable liability per judgment. Retrying never increments twice.
+    pub fn reserve_judgment(
+        ctx: Context<ReserveJudgment>,
+        worker: Pubkey,
+        resolution_id: [u8; 16],
+    ) -> Result<()> {
+        let liability = &mut ctx.accounts.liability;
+        if liability.worker != Pubkey::default() {
+            require!(!liability.resolved, Error::Invalid);
+            return Ok(());
+        }
+        require!(ctx.accounts.bond.warnings < 2, Error::Slashed);
+        require!(
+            ctx.accounts.bond_vault.amount >= ctx.accounts.config.min_bond,
+            Error::Invalid
+        );
+        ctx.accounts.bond.pending = ctx
+            .accounts
+            .bond
+            .pending
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
+        liability.set_inner(Liability {
+            worker,
+            resolution_id,
+            resolved: false,
+            penalize: false,
+            warnings: 0,
+        });
+        Ok(())
+    }
+
+    /// Enforcement and release happen atomically and at most once per resolution.
+    pub fn resolve_judgment(
+        ctx: Context<ResolveJudgment>,
+        worker: Pubkey,
+        resolution_id: [u8; 16],
+        penalize: bool,
+    ) -> Result<()> {
+        // A cancelled, not-yet-reserved submission gets a tombstone. This
+        // also blocks a delayed reserve transaction after the pair resolves.
+        if ctx.accounts.liability.worker == Pubkey::default() {
+            require!(!penalize, Error::Invalid);
+            ctx.accounts.liability.set_inner(Liability {
+                worker,
+                resolution_id,
+                resolved: true,
+                penalize: false,
+                warnings: ctx.accounts.bond.warnings,
+            });
+            return Ok(());
+        }
+        if ctx.accounts.liability.resolved {
+            require!(ctx.accounts.liability.penalize == penalize, Error::Invalid);
+            return Ok(());
+        }
+        let warnings = resolution_warnings(ctx.accounts.bond.warnings, penalize);
+        if warnings == TERMINAL_WARNINGS && ctx.accounts.bond.warnings != TERMINAL_WARNINGS {
+            let seeds: &[&[u8]] = &[b"bond", worker.as_ref(), &[ctx.bumps.bond]];
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.key(),
+                    Transfer {
+                        from: ctx.accounts.bond_vault.to_account_info(),
+                        to: ctx.accounts.penalty_vault.to_account_info(),
+                        authority: ctx.accounts.bond.to_account_info(),
+                    },
+                    &[seeds],
+                ),
+                ctx.accounts.bond_vault.amount,
+            )?;
+        }
+        ctx.accounts.bond.warnings = warnings;
+        ctx.accounts.bond.pending = ctx
+            .accounts
+            .bond
+            .pending
+            .checked_sub(1)
+            .ok_or(Error::Invalid)?;
+        ctx.accounts.liability.resolved = true;
+        ctx.accounts.liability.penalize = penalize;
+        ctx.accounts.liability.warnings = warnings;
+        Ok(())
+    }
+}
+
+pub fn resolution_warnings(warnings: u8, penalize: bool) -> u8 {
+    if !penalize || warnings == TERMINAL_WARNINGS {
+        warnings
+    } else if warnings == 0 {
+        1
+    } else {
+        TERMINAL_WARNINGS
     }
 }
 
@@ -244,6 +350,20 @@ pub struct Batch {
 pub struct Payment {
     /// The treasury keypair that recorded (and mints) this payment id.
     pub mint_authority: Pubkey,
+    pub recipient: Pubkey,
+    pub mint: Pubkey,
+    pub amount: u64,
+    pub payment_id: [u8; 16],
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct Liability {
+    pub worker: Pubkey,
+    pub resolution_id: [u8; 16],
+    pub resolved: bool,
+    pub penalize: bool,
+    pub warnings: u8,
 }
 
 #[derive(Accounts)]
@@ -358,12 +478,57 @@ pub struct PostBatch<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(payment_id: [u8; 16])]
+#[instruction(payment_id: [u8; 16], recipient: Pubkey, amount: u64)]
 pub struct RecordPayment<'info> {
-    #[account(mut)]
+    #[account(mut, constraint=skr_mint.mint_authority == Some(mint_authority.key()).into() @ Error::Unauthorized)]
     pub mint_authority: Signer<'info>,
-    #[account(init, payer=mint_authority, space=8+Payment::INIT_SPACE, seeds=[b"payment", payment_id.as_ref()], bump)]
+    #[account(seeds=[b"config"], bump, has_one=skr_mint)]
+    pub config: Account<'info, Config>,
+    #[account(mut)]
+    pub skr_mint: Account<'info, Mint>,
+    #[account(init, payer=mint_authority, space=8+Payment::INIT_SPACE,
+        seeds=[b"payment-v2", skr_mint.key().as_ref(), recipient.as_ref(), &amount.to_le_bytes(), payment_id.as_ref()], bump)]
     pub payment: Account<'info, Payment>,
+    #[account(mut, token::mint=skr_mint, token::authority=recipient)]
+    pub destination: Account<'info, TokenAccount>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+#[instruction(worker: Pubkey, resolution_id: [u8; 16])]
+pub struct ReserveJudgment<'info> {
+    #[account(mut, constraint=authority.key() == config.verifier @ Error::Unauthorized)]
+    pub authority: Signer<'info>,
+    #[account(seeds=[b"config"], bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut, seeds=[b"bond", worker.as_ref()], bump, constraint=bond.worker == worker @ Error::Unauthorized)]
+    pub bond: Account<'info, Bond>,
+    #[account(seeds=[b"bond-vault", worker.as_ref(), config.skr_mint.as_ref()], bump, token::mint=config.skr_mint, token::authority=bond)]
+    pub bond_vault: Account<'info, TokenAccount>,
+    #[account(init_if_needed, payer=authority, space=8+Liability::INIT_SPACE,
+        seeds=[b"liability", worker.as_ref(), resolution_id.as_ref()], bump)]
+    pub liability: Account<'info, Liability>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(worker: Pubkey, resolution_id: [u8; 16])]
+pub struct ResolveJudgment<'info> {
+    #[account(mut, constraint=authority.key() == config.slash_authority @ Error::Unauthorized)]
+    pub authority: Signer<'info>,
+    #[account(seeds=[b"config"], bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut, seeds=[b"bond", worker.as_ref()], bump, constraint=bond.worker == worker @ Error::Unauthorized)]
+    pub bond: Account<'info, Bond>,
+    #[account(mut, seeds=[b"bond-vault", worker.as_ref(), config.skr_mint.as_ref()], bump, token::mint=config.skr_mint, token::authority=bond)]
+    pub bond_vault: Account<'info, TokenAccount>,
+    #[account(init_if_needed, payer=authority, space=8+Liability::INIT_SPACE,
+        seeds=[b"liability", worker.as_ref(), resolution_id.as_ref()], bump)]
+    pub liability: Account<'info, Liability>,
+    #[account(mut, seeds=[b"penalty-vault", config.skr_mint.as_ref()], bump, token::mint=config.skr_mint, token::authority=config)]
+    pub penalty_vault: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
@@ -406,6 +571,23 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_penalty_is_two_strikes_and_terminal_is_preserved() {
+        assert_eq!(resolution_warnings(0, false), 0);
+        assert_eq!(resolution_warnings(1, false), 1);
+        assert_eq!(resolution_warnings(0, true), 1);
+        assert_eq!(resolution_warnings(1, true), TERMINAL_WARNINGS);
+        assert_eq!(resolution_warnings(2, true), TERMINAL_WARNINGS);
+        assert_eq!(
+            resolution_warnings(TERMINAL_WARNINGS, true),
+            TERMINAL_WARNINGS
+        );
+        assert_eq!(
+            resolution_warnings(TERMINAL_WARNINGS, false),
+            TERMINAL_WARNINGS
+        );
+    }
 
     // -- warning ladder --------------------------------------------------
 

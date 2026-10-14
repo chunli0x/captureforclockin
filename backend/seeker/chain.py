@@ -6,6 +6,7 @@ import json
 import struct
 import time
 from urllib.parse import urlparse
+from types import SimpleNamespace
 
 import httpx
 from solders.hash import Hash
@@ -270,7 +271,7 @@ class Chain:
             if st is not None:
                 if st.get("err") is not None:
                     raise ChainUnavailable("Transaction failed to execute")
-                if st.get("confirmationStatus") in ("finalized", "confirmed"):
+                if st.get("confirmationStatus") == "finalized":
                     return True
             if time.monotonic() > deadline:
                 raise ChainUnavailable("Transaction did not confirm in time")
@@ -361,64 +362,116 @@ class Chain:
         self._confirm_sent(sig)
         return sig
 
-    def settle_skr(self, wallet, amount, memo=None):
-        """Pay ``amount`` test $SKR to the judge's $SKR ATA. The treasury
-        keypair is the $SKR mint authority, so settlement mints test $SKR to the
-        judge (devnet faucet-equivalent; no separate $SKR funding step to
-        deadlock on). Server-signed. Fail closed when the treasury is not
-        configured.
+    def _account_data(self, address):
+        account = self.rpc("getAccountInfo", [str(address), {
+            "encoding": "base64", "commitment": "finalized",
+        }])["value"]
+        if account is None:
+            return None
+        if account["owner"] != str(self.program):
+            raise ChainUnavailable("Receipt has the wrong owner")
+        try:
+            return base64.b64decode(account["data"][0], validate=True)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ChainUnavailable("Invalid receipt data") from exc
 
-        ``memo`` (optional) makes distinct logical payments produce distinct
-        transactions: two equal mints to the same wallet within one blockhash
-        window would otherwise be byte-identical and dedupe to a single
-        execution. Callers pass a unique per-judgment id so each reward is its
-        own transaction. When present, the id is also recorded on-chain BEFORE
-        minting so a retry cannot double-pay (finding #2)."""
+    def reserve_judgment(self, wallet, resolution_id):
+        worker = Pubkey.from_string(wallet)
+        rid = bytes.fromhex(resolution_id)
+        liability = self.pda(b"liability", bytes(worker), rid)
+        raw = self._account_data(liability)
+        if raw is not None:
+            if (len(raw) != 59 or raw[:56] != discriminator("Liability", "account") + bytes(worker) + rid
+                    or raw[56] != 0):
+                raise ChainUnavailable("Invalid or already resolved liability")
+            return
+        ix = Instruction(self.program, discriminator("reserve_judgment") + bytes(worker) + rid, [
+            meta(self.verifier.pubkey(), True, True), meta(self.config),
+            meta(self.pda(b"bond", bytes(worker)), writable=True),
+            meta(self.pda(b"bond-vault", bytes(worker), bytes(self.skr))),
+            meta(liability, writable=True), meta(SYSTEM),
+        ])
+        sig = self._sign_and_send([ix], self.verifier)
+        self._confirm_sent(sig)
+
+    def resolve_judgment(self, wallet, resolution_id, penalize):
+        worker = Pubkey.from_string(wallet)
+        rid = bytes.fromhex(resolution_id)
+        liability = self.pda(b"liability", bytes(worker), rid)
+        raw = self._account_data(liability)
+        if raw is not None and (len(raw) != 59 or raw[:56] != discriminator("Liability", "account") + bytes(worker) + rid):
+            raise ChainUnavailable("Missing or invalid judgment liability")
+        if raw is not None and raw[56]:
+            if raw[57] != int(penalize):
+                raise ChainUnavailable("Resolution does not match journal")
+            return self.bond_warnings(wallet)
+        ix = Instruction(self.program, discriminator("resolve_judgment") + bytes(worker) + rid + bytes([penalize]), [
+            meta(self.verifier.pubkey(), True, True), meta(self.config),
+            meta(self.pda(b"bond", bytes(worker)), writable=True),
+            meta(self.pda(b"bond-vault", bytes(worker), bytes(self.skr)), writable=True),
+            meta(liability, writable=True), meta(self.penalty_vault, writable=True), meta(TOKEN_PROGRAM_ID), meta(SYSTEM),
+        ])
+        sig = self._sign_and_send([ix], self.verifier)
+        self._confirm_sent(sig)
+        return self.bond_warnings(wallet)
+
+    def settle_skr(self, wallet, amount, memo, *, persist, prepared=None):
+        """Verify a receipt on retry; journal signed bytes before any broadcast.
+
+        The program atomically mints and creates an immutable, fully bound
+        receipt. An expired transaction can safely be rebuilt: concurrent or
+        late submissions cannot mint twice, because they share that receipt.
+        """
         if self.treasury is None:
             raise ChainUnavailable("$SKR treasury (mint authority) is not configured")
-        worker = Pubkey.from_string(wallet)
-        payer = self.treasury
-        instructions = [ata_instruction(payer.pubkey(), worker, self.skr)]
-        if memo is not None:
-            # Idempotent settlement (finding #2): record the payment id BEFORE
-            # minting. The payment PDA is seeded off the 16-byte id, so a retry
-            # whose payment was already recorded fails the whole transaction and
-            # cannot double-mint the judge.
-            payment_id = hashlib.sha256(memo.encode()).digest()[:16]
-            instructions.append(
-                Instruction(
-                    self.program,
-                    discriminator("record_payment") + payment_id,
-                    [
-                        meta(payer.pubkey(), True, True),
-                        meta(self.pda(b"payment", payment_id), writable=True),
-                        meta(SYSTEM),
-                    ],
-                )
-            )
-        instructions.append(
-            mint_to(
-                MintToParams(
-                    program_id=TOKEN_PROGRAM_ID,
-                    mint=self.skr,
-                    dest=get_associated_token_address(worker, self.skr),
-                    mint_authority=payer.pubkey(),
-                    amount=amount,
-                    signers=[payer.pubkey()],
-                )
-            )
-        )
-        if memo is not None:
-            instructions.append(
-                Instruction(
-                    MEMO_PROGRAM,
-                    (memo.encode() if isinstance(memo, str) else bytes(memo)),
-                    [],
-                )
-            )
-        sig = self._sign_and_send(instructions, payer)
-        self._confirm_sent(sig)
-        return sig
+        worker, payer = Pubkey.from_string(wallet), self.treasury
+        payment_id = hashlib.sha256(memo.encode()).digest()[:16]
+        receipt = self.pda(b"payment-v2", bytes(self.skr), bytes(worker), struct.pack("<Q", amount), payment_id)
+        instructions = [ata_instruction(payer.pubkey(), worker, self.skr), Instruction(
+            self.program,
+            discriminator("record_payment") + payment_id + bytes(worker) + struct.pack("<Q", amount),
+            [meta(payer.pubkey(), True, True), meta(self.config), meta(self.skr, writable=True),
+             meta(receipt, writable=True), meta(get_associated_token_address(worker, self.skr), writable=True),
+             meta(SYSTEM), meta(TOKEN_PROGRAM_ID)],
+        )]
+        fingerprint = message_fingerprint(Message.new_with_blockhash(instructions, payer.pubkey(), Hash.default()))
+        raw = self._account_data(receipt)
+        if raw is not None:
+            expected = (discriminator("Payment", "account") + bytes(payer.pubkey()) + bytes(worker)
+                        + bytes(self.skr) + struct.pack("<Q", amount) + payment_id)
+            if raw != expected:
+                raise ChainUnavailable("Payment receipt does not match obligation")
+            return self.find_signature(SimpleNamespace(message_hash=fingerprint), address=receipt)
+
+        # Old receipts did not bind the payment. Only the actual, exactly
+        # matching finalized mint transaction can prove a legacy payout.
+        legacy = self.pda(b"payment", payment_id)
+        if self._account_data(legacy) is not None:
+            old = [instructions[0], Instruction(self.program, discriminator("record_payment") + payment_id,
+                [meta(payer.pubkey(), True, True), meta(legacy, writable=True), meta(SYSTEM)]),
+                mint_to(MintToParams(program_id=TOKEN_PROGRAM_ID, mint=self.skr,
+                    dest=get_associated_token_address(worker, self.skr), mint_authority=payer.pubkey(),
+                    amount=amount, signers=[payer.pubkey()])), Instruction(MEMO_PROGRAM, memo.encode(), [])]
+            old_hash = message_fingerprint(Message.new_with_blockhash(old, payer.pubkey(), Hash.default()))
+            return self.find_signature(SimpleNamespace(message_hash=old_hash), address=legacy)
+
+        if prepared is None or self.height() > prepared["last_valid_height"]:
+            result = self.rpc("getLatestBlockhash", [{"commitment": "finalized"}])["value"]
+            blockhash = Hash.from_string(result["blockhash"])
+            tx = Transaction.new_unsigned(Message.new_with_blockhash(instructions, payer.pubkey(), blockhash))
+            tx.sign([payer], blockhash)
+            prepared = {"transaction": base64.b64encode(bytes(tx)).decode(),
+                        "signature": str(tx.signatures[0]), "last_valid_height": result["lastValidBlockHeight"]}
+            persist(prepared)  # must commit before sendTransaction
+        tx = Transaction.from_bytes(base64.b64decode(prepared["transaction"], validate=True))
+        tx.verify()
+        if message_fingerprint(tx.message) != fingerprint or str(tx.signatures[0]) != prepared["signature"]:
+            raise ChainUnavailable("Journaled payment does not match obligation")
+        self.rpc("sendTransaction", [prepared["transaction"], {
+            "encoding": "base64", "preflightCommitment": "finalized",
+        }])
+        self._confirm_sent(prepared["signature"])
+        return prepared["signature"]
 
     def post_batch(self, batch_id: str, merkle_root: str) -> str:
         """Anchor a resolved batch's Merkle root on-chain (append-only PDA).
@@ -490,8 +543,9 @@ class Chain:
             raise ChainUnavailable("Transaction does not match this prepared operation")
         return True
 
-    def find_signature(self, prepared):
-        address = self.pda(b"bond", bytes(Pubkey.from_string(prepared.wallet)))
+    def find_signature(self, prepared, address=None):
+        if address is None:
+            address = self.pda(b"bond", bytes(Pubkey.from_string(prepared.wallet)))
         page_size = 100
         max_pages = 20  # sane cap: walk at most 2000 signatures
         # Overall wall-clock bound on the whole walk, on top of the per-call

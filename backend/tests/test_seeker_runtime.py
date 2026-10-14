@@ -212,3 +212,183 @@ def test_initializer_requires_program_upgrade_authority(runtime):
     ok(initialize(admin))
     assert svm.get_account(c.config).data[8:40] == bytes(admin.pubkey())
     bad(initialize(other))
+
+
+def send_instructions(runtime, instructions, signer):
+    svm = runtime[0]
+    svm.expire_blockhash()
+    msg = Message.new_with_blockhash(instructions, signer.pubkey(), svm.latest_blockhash())
+    tx = Transaction.new_unsigned(msg)
+    tx.sign([signer], msg.recent_blockhash)
+    return svm.send_transaction(tx)
+
+
+def liability_instruction(runtime, worker, rid, *, penalize=None, authority=None):
+    _svm, c, _admin, _worker, _other, verifier = runtime
+    authority = authority or verifier
+    accounts = [meta(authority.pubkey(), True, True), meta(c.config),
+                meta(c.pda(b"bond", bytes(worker)), writable=True),
+                meta(c.pda(b"bond-vault", bytes(worker), bytes(c.skr)), writable=penalize is not None),
+                meta(c.pda(b"liability", bytes(worker), rid), writable=True)]
+    if penalize is None:
+        accounts += [meta(SYSTEM)]
+        data = discriminator("reserve_judgment") + bytes(worker) + rid
+    else:
+        accounts += [meta(c.penalty_vault, writable=True), meta(TOKEN_PROGRAM_ID), meta(SYSTEM)]
+        data = discriminator("resolve_judgment") + bytes(worker) + rid + bytes([penalize])
+    return Instruction(c.program, data, accounts)
+
+
+def pending(runtime, worker):
+    _svm, c, *_ = runtime
+    data = runtime[0].get_account(c.pda(b"bond", bytes(worker))).data
+    return struct.unpack("<I", data[40:44])[0]
+
+
+def test_open_liabilities_lock_withdrawal_until_each_resolution(runtime):
+    svm, c, _admin, worker, other, verifier = runtime
+    ok(send(runtime, "deposit", worker))
+    first, second = b"1" * 16, b"2" * 16
+    reserve = liability_instruction(runtime, worker.pubkey(), first)
+    bad(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), first, authority=other)], other))
+    assert pending(runtime, worker.pubkey()) == 0
+    ok(send_instructions(runtime, [reserve], verifier))
+    ok(send_instructions(runtime, [reserve], verifier))
+    assert pending(runtime, worker.pubkey()) == 1
+    ok(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), second)], verifier))
+    clock = svm.get_clock()
+    clock.unix_timestamp = 86_501
+    svm.set_clock(clock)
+    bad(send(runtime, "withdraw", worker))
+    release = liability_instruction(runtime, worker.pubkey(), first, penalize=False)
+    bad(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), first, penalize=False, authority=other)], other))
+    ok(send_instructions(runtime, [release], verifier))
+    ok(send_instructions(runtime, [release], verifier))
+    assert pending(runtime, worker.pubkey()) == 1
+    bad(send(runtime, "withdraw", worker))
+    ok(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), second, penalize=False)], verifier))
+    assert pending(runtime, worker.pubkey()) == 0
+    ok(send(runtime, "withdraw", worker))
+    bad(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), b"3" * 16)], verifier))
+
+
+def test_resolution_warn_and_slash_are_atomic_and_idempotent(runtime):
+    svm, c, _admin, worker, _other, verifier = runtime
+    ok(send(runtime, "deposit", worker))
+    ids = [bytes([n]) * 16 for n in (1, 2, 3)]
+    for rid in ids:
+        ok(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), rid)], verifier))
+    first = liability_instruction(runtime, worker.pubkey(), ids[0], penalize=True)
+    ok(send_instructions(runtime, [first], verifier))
+    ok(send_instructions(runtime, [first], verifier))
+    bond = c.pda(b"bond", bytes(worker.pubkey()))
+    assert svm.get_account(bond).data[52] == 1
+    assert pending(runtime, worker.pubkey()) == 2
+    second = liability_instruction(runtime, worker.pubkey(), ids[1], penalize=True)
+    ok(send_instructions(runtime, [second], verifier))
+    ok(send_instructions(runtime, [second], verifier))
+    assert svm.get_account(bond).data[52] == 255
+    assert struct.unpack("<Q", svm.get_account(c.penalty_vault).data[64:72])[0] == 100
+    assert pending(runtime, worker.pubkey()) == 1
+    # Fresh deposits cannot erase outstanding liabilities after a slash.
+    bad(send(runtime, "deposit", worker))
+    ok(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), ids[2], penalize=False)], verifier))
+    ok(send(runtime, "deposit", worker))
+    assert svm.get_account(bond).data[52] == 0
+    # Replaying the old penalty cannot slash this new deposit.
+    ok(send_instructions(runtime, [second], verifier))
+    assert svm.get_account(bond).data[52] == 0
+    bad(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), ids[0], penalize=False)], verifier))
+
+
+def test_cancelled_submission_tombstone_blocks_late_reservation(runtime):
+    _svm, _c, _admin, worker, _other, verifier = runtime
+    ok(send(runtime, "deposit", worker))
+    rid = b"c" * 16
+    ok(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), rid, penalize=False)], verifier))
+    bad(send_instructions(runtime, [liability_instruction(runtime, worker.pubkey(), rid)], verifier))
+    assert pending(runtime, worker.pubkey()) == 0
+
+
+def payment_instruction(runtime, signer, recipient, amount, payment_id, *, mint=None, receipt=None, destination=None):
+    c = runtime[1]
+    mint = mint or c.skr
+    receipt = receipt or c.pda(b"payment-v2", bytes(mint), bytes(recipient), struct.pack("<Q", amount), payment_id)
+    destination = destination or get_associated_token_address(recipient, mint)
+    return Instruction(c.program, discriminator("record_payment") + payment_id + bytes(recipient) + struct.pack("<Q", amount), [
+        meta(signer.pubkey(), True, True), meta(c.config), meta(mint, writable=True),
+        meta(receipt, writable=True), meta(destination, writable=True), meta(SYSTEM), meta(TOKEN_PROGRAM_ID),
+    ])
+
+
+def test_payment_receipt_requires_mint_authority_and_proves_exact_atomic_mint(runtime):
+    svm, c, admin, worker, other, _verifier = runtime
+    pid = b"p" * 16
+    receipt = c.pda(b"payment-v2", bytes(c.skr), bytes(worker.pubkey()), struct.pack("<Q", 25), pid)
+    bad(send_instructions(runtime, [payment_instruction(runtime, other, worker.pubkey(), 25, pid)], other))
+    assert svm.get_account(receipt) is None
+    assert balance(runtime, worker.pubkey(), c.skr) == 10_000
+    # The address is bound independently to amount, recipient and mint.
+    bad(send_instructions(runtime, [payment_instruction(runtime, admin, worker.pubkey(), 26, pid, receipt=receipt)], admin))
+    bad(send_instructions(runtime, [payment_instruction(runtime, admin, other.pubkey(), 25, pid, receipt=receipt)], admin))
+    other_mint = Pubkey.new_unique()
+    svm.set_account(other_mint, mint_account(admin.pubkey()))
+    svm.set_account(get_associated_token_address(worker.pubkey(), other_mint), token_account(other_mint, worker.pubkey(), 0))
+    bad(send_instructions(runtime, [payment_instruction(runtime, admin, worker.pubkey(), 25, pid, mint=other_mint)], admin))
+    # Wrong destination fails without leaving a receipt behind.
+    bad(send_instructions(runtime, [payment_instruction(runtime, admin, worker.pubkey(), 25, pid,
+        destination=get_associated_token_address(other.pubkey(), c.skr))], admin))
+    assert svm.get_account(receipt) is None
+    ix = payment_instruction(runtime, admin, worker.pubkey(), 25, pid)
+    ok(send_instructions(runtime, [ix], admin))
+    assert balance(runtime, worker.pubkey(), c.skr) == 10_025
+    assert svm.get_account(receipt).data == (discriminator("Payment", "account") + bytes(admin.pubkey())
+        + bytes(worker.pubkey()) + bytes(c.skr) + struct.pack("<Q", 25) + pid)
+    bad(send_instructions(runtime, [ix], admin))
+    assert balance(runtime, worker.pubkey(), c.skr) == 10_025
+
+
+def test_chain_retry_recovers_finalized_receipt_after_confirmation_loss(runtime):
+    import base64
+    from seeker.chain import ChainUnavailable
+    svm, chain, admin, worker, _other, _verifier = runtime
+    chain.treasury = admin
+    sent, journal = {}, []
+    confirmation_available = False
+
+    def rpc(method, params):
+        if method == "getAccountInfo":
+            account = svm.get_account(Pubkey.from_string(params[0]))
+            return {"value": None if account is None else {
+                "owner": str(account.owner), "data": [base64.b64encode(account.data).decode(), "base64"],
+            }}
+        if method == "getLatestBlockhash":
+            svm.expire_blockhash()
+            return {"value": {"blockhash": str(svm.latest_blockhash()), "lastValidBlockHeight": 100}}
+        if method == "sendTransaction":
+            assert journal, "signed transaction must be persisted BEFORE broadcast"
+            assert journal[-1]["transaction"] == params[0]
+            tx = Transaction.from_bytes(base64.b64decode(params[0]))
+            ok(svm.send_transaction(tx))
+            sig = str(tx.signatures[0])
+            sent[sig] = params[0]
+            return sig
+        if method == "getSignatureStatuses":
+            if not confirmation_available:
+                raise ChainUnavailable("confirmation transport lost")
+            return {"value": [{"err": None, "confirmationStatus": "finalized"}]}
+        if method == "getSignaturesForAddress":
+            return [{"signature": sig, "err": None} for sig in sent]
+        if method == "getTransaction":
+            return {"meta": {"err": None}, "transaction": [sent[params[0]], "base64"]}
+        raise AssertionError(method)
+
+    chain.rpc = rpc
+    with pytest.raises(ChainUnavailable, match="confirmation transport"):
+        chain.settle_skr(str(worker.pubkey()), 25, "retry-test", persist=journal.append)
+    assert balance(runtime, worker.pubkey(), chain.skr) == 10_025
+    confirmation_available = True
+    sig = chain.settle_skr(str(worker.pubkey()), 25, "retry-test", persist=journal.append, prepared=journal[-1])
+    assert sig == journal[-1]["signature"]
+    assert len(sent) == 1 and len(journal) == 1
+    assert balance(runtime, worker.pubkey(), chain.skr) == 10_025
