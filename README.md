@@ -1,8 +1,17 @@
 # Capture
 
-**Humans judge model outputs. Consensus decides who gets paid in $SKR on Solana. Create a human verified data set for training robot vision.**
+The most expensive part of building AI (aside from hardware) is Reinforcement Learning Human Feedback (RLHF).
 
-Capture is a decentralized RLHF platform for the Solana Seeker mobile. Contributors stake a $SKR bond, judge a vision model's outputs, and earn $SKR only when their judgment agrees with the crowd. Dissenters earn nothing, and systematic bad faith costs the bond. The result is an RLHF preference dataset with on-chain provenance, produced without a labeling firm and without guessing.
+A labeled dataset costs up to $0.30 per judgment, or 125 hours of lost time.
+
+Over the past few weeks I built a market where humans do work bots can't.
+
+Introducing Capture:
+Prove you're human. Stake a bond. Rate robot vision outputs. Earn $SKR.
+
+The more accurate you are, the higher your payout. Consensus of three judges settles every pair.
+
+Built for @solanamobile
 
 ## What it does
 
