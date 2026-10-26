@@ -2,6 +2,7 @@ package ai.loosh.union.seeker
 
 import ai.loosh.union.*
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -56,7 +57,7 @@ fun SeekerApp(sender: ActivityResultSender, vm: SeekerViewModel = viewModel()) {
     var showBond by remember { mutableStateOf(false) }
     var showBalances by remember { mutableStateOf(false) }
     var showCalibration by remember { mutableStateOf(false) }
-    var showLiveness by remember { mutableStateOf(false) }
+    var showLiveness by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("seeker.api", Context.MODE_PRIVATE) }
     var onboarded by remember { mutableStateOf(prefs.getBoolean("onboarded", false)) }
@@ -97,19 +98,30 @@ fun SeekerApp(sender: ActivityResultSender, vm: SeekerViewModel = viewModel()) {
                 s.wallet.isEmpty() -> SignInScreen(s, vm, sender)
                 showLiveness -> {
                     LaunchedEffect(Unit) { vm.startLiveness() }
+                    LaunchedEffect(s.livenessCompleted) {
+                        if (s.livenessCompleted) showLiveness = false
+                    }
                     val challenge = s.livenessChallenge
                     if (challenge == null) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Starting the human check…", color = CaptureInk)
+                        BackHandler { showLiveness = false }
+                        Column(
+                            Modifier.fillMaxSize().padding(24.dp),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(s.error ?: "Starting the human check…", color = CaptureInk)
+                            if (!s.busy) {
+                                ActionButton("Try again", onClick = vm::startLiveness)
+                            }
+                            TextButton(onClick = { showLiveness = false }) { Text("Cancel") }
                         }
                     } else {
                         LivenessScreen(
                             challengeWire = challenge,
                             busy = s.error ?: s.message,
-                            onPassed = {
-                                vm.completeLiveness(it)
-                                showLiveness = false
-                            },
+                            submitting = s.busy,
+                            onRetry = if (s.error != null && !s.busy) vm::startLiveness else null,
+                            onPassed = vm::completeLiveness,
                             onCancel = { showLiveness = false },
                         )
                     }

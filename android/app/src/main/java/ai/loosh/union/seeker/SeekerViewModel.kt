@@ -158,6 +158,7 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun clearSession() {
         token = null
+        livenessSessionId = null
         adapter.authToken = null
         mutable.value = PilotState(server = mutable.value.server, busy = mutable.value.busy)
     }
@@ -309,6 +310,8 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun startLiveness() =
         run("Starting the human check", null) {
+            livenessSessionId = null
+            mutable.update { it.copy(livenessChallenge = null) }
             val s = post(
                 "/liveness/session",
                 JSONObject()
@@ -330,7 +333,9 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
                     .put("result_digest", resultDigest),
             )
             livenessSessionId = null
-            mutable.update { it.copy(livenessChallenge = null) }
+            // Completion is already persisted. A later stats/next failure must
+            // not leave the client treating this single-use session as pending.
+            mutable.update { it.copy(livenessCompleted = true, livenessChallenge = null) }
             refreshJudgment()
         }
 

@@ -42,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -60,6 +61,8 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import android.graphics.Bitmap
+import android.graphics.Matrix
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Executors
 
 /**
@@ -79,6 +82,8 @@ fun LivenessScreen(
     busy: String?,
     onPassed: (resultDigestHex: String) -> Unit,
     onCancel: () -> Unit,
+    submitting: Boolean = false,
+    onRetry: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -145,15 +150,8 @@ fun LivenessScreen(
             return@Column
         }
 
-        if (started && granted) {
-            LivenessCamera(
-                challenge = challenge,
-                lifecycleOwner = lifecycleOwner,
-                onPassed = onPassed,
-                modifier = Modifier.fillMaxWidth().aspectRatio(0.75f),
-            )
-        } else {
-            LivenessPreCheck()
+        // Keep both entry points above the artwork/preview on small screens.
+        if (!started || !granted) {
             if (denied) {
                 Spacer(Modifier.height(16.dp))
                 Text(
@@ -167,6 +165,7 @@ fun LivenessScreen(
             Spacer(Modifier.height(24.dp))
             ActionButton(
                 label = "Begin check",
+                enabled = !submitting,
                 labelStyle = MaterialTheme.typography.titleLarge.copy(fontFamily = Anton),
                 onClick = {
                     // Recheck after returning from Settings; never open the camera
@@ -186,6 +185,7 @@ fun LivenessScreen(
         Spacer(Modifier.height(8.dp))
         TextButton(
             modifier = Modifier.heightIn(min = CaptureDimensions.primaryButtonMinHeight),
+            enabled = !submitting,
             onClick = {
                 // Nonzero 32-byte demo digest accepted by the session API.
                 // This escape hatch deliberately works without camera permission.
@@ -197,6 +197,22 @@ fun LivenessScreen(
         busy?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = CaptureMutedText)
             Spacer(Modifier.height(8.dp))
+        }
+        onRetry?.let { retry ->
+            ActionButton("Try again", onClick = {
+                started = false
+                retry()
+            }, enabled = !submitting)
+        }
+        if (started && granted) {
+            LivenessCamera(
+                challenge = challenge,
+                lifecycleOwner = lifecycleOwner,
+                onPassed = { if (!submitting) onPassed(it) },
+                modifier = Modifier.fillMaxWidth().aspectRatio(0.75f),
+            )
+        } else {
+            LivenessPreCheck()
         }
         Text(
             "Images are processed on-device and not retained.",
@@ -261,8 +277,18 @@ private fun LivenessCamera(
 ) {
     val context = LocalContext.current
     val detector = remember(challenge) { LivenessDetector(challenge) }
+    val currentOnPassed by rememberUpdatedState(onPassed)
     var hint by remember { mutableStateOf(detector.hint()) }
     var finished by remember { mutableStateOf(false) }
+    var cameraError by remember { mutableStateOf<String?>(null) }
+    val active = remember { AtomicBoolean(true) }
+    var releaseCamera by remember { mutableStateOf<(() -> Unit)?>(null) }
+    DisposableEffect(Unit) {
+        onDispose {
+            active.set(false)
+            releaseCamera?.invoke()
+        }
+    }
 
     // The passive texture check. Null when this device cannot run it, which is
     // surfaced rather than silently dropped - see SpoofClassifier.
@@ -301,54 +327,62 @@ private fun LivenessCamera(
                 }
                 val providerFuture = ProcessCameraProvider.getInstance(ctx)
                 providerFuture.addListener({
-                    val provider = providerFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-                    val analysis = ImageAnalysis.Builder()
-                        // Dropping stale frames keeps the state machine reading
-                        // the present, not a backlog; a queued blink arriving
-                        // late would confirm against the wrong phase.
-                        .setBackpressureStrategy(
-                            ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
+                    if (!active.get()) return@addListener
+                    try {
+                        val provider = providerFuture.get()
+                        val preview = Preview.Builder().build().also {
+                            it.surfaceProvider = previewView.surfaceProvider
+                        }
+                        val analysis = ImageAnalysis.Builder()
+                            // Dropping stale frames keeps the state machine reading
+                            // the present, not a backlog; a queued blink arriving
+                            // late would confirm against the wrong phase.
+                            .setBackpressureStrategy(
+                                ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
+                            )
+                            .build()
+
+                        analysis.setAnalyzer(
+                            analysisExecutor,
+                            faceAnalyzer(faceDetector, classifier, fusion, active) { sample ->
+                                if (fusionAttempt != fusion.attempt) {
+                                    detector.reset()
+                                    fusionAttempt = fusion.attempt
+                                }
+                                val phase = detector.accept(sample)
+                                val outcome = fusion.outcome(phase == LivenessPhase.PASSED)
+                                detector.recordPassiveCheck(outcome, classifier != null)
+                                spoofSuspected = fusion.spoofSuspected
+                                hint = when {
+                                    spoofSuspected ->
+                                        "That looks like a photo or a screen. " +
+                                            "Try again with your own face."
+                                    else -> detector.hint()
+                                }
+                                // Both checks, or the classifier being genuinely
+                                // unavailable on this device. Never a spoof.
+                                val ready = outcome == LivenessOutcome.PASSED ||
+                                    (classifier == null && phase == LivenessPhase.PASSED)
+                                if (ready && !finished) {
+                                    finished = true
+                                    currentOnPassed(detector.resultDigestHex())
+                                }
+                            },
                         )
-                        .build()
 
-                    analysis.setAnalyzer(
-                        analysisExecutor,
-                        faceAnalyzer(faceDetector, classifier, fusion) { sample ->
-                            if (fusionAttempt != fusion.attempt) {
-                                detector.reset()
-                                fusionAttempt = fusion.attempt
-                            }
-                            val phase = detector.accept(sample)
-                            val outcome = fusion.outcome(phase == LivenessPhase.PASSED)
-                            detector.recordPassiveCheck(outcome, classifier != null)
-                            spoofSuspected = fusion.spoofSuspected
-                            hint = when {
-                                spoofSuspected ->
-                                    "That looks like a photo or a screen. " +
-                                        "Try again with your own face."
-                                else -> detector.hint()
-                            }
-                            // Both checks, or the classifier being genuinely
-                            // unavailable on this device. Never a spoof.
-                            val ready = outcome == LivenessOutcome.PASSED ||
-                                (classifier == null && phase == LivenessPhase.PASSED)
-                            if (ready && !finished) {
-                                finished = true
-                                onPassed(detector.resultDigestHex())
-                            }
-                        },
-                    )
-
-                    provider.unbindAll()
-                    provider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_FRONT_CAMERA,
-                        preview,
-                        analysis,
-                    )
+                        releaseCamera = {
+                            analysis.clearAnalyzer()
+                            provider.unbind(preview, analysis)
+                        }
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            CameraSelector.DEFAULT_FRONT_CAMERA,
+                            preview,
+                            analysis,
+                        )
+                    } catch (_: Exception) {
+                        cameraError = "Couldn't open the camera. Use Continue (demo), or cancel and try again."
+                    }
                 }, ContextCompat.getMainExecutor(ctx))
                 previewView
             },
@@ -359,7 +393,7 @@ private fun LivenessCamera(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF181626)),
         ) {
             Text(
-                hint,
+                cameraError ?: hint,
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
                 style = MaterialTheme.typography.titleLarge,
                 color = Color(0xFFFFF3D6),
@@ -386,10 +420,15 @@ private fun faceAnalyzer(
     faceDetector: com.google.mlkit.vision.face.FaceDetector,
     classifier: SpoofClassifier?,
     fusion: LivenessFusion,
+    active: AtomicBoolean,
     onSample: (FaceSample?) -> Unit,
 ): ImageAnalysis.Analyzer {
     var trackedFace: Int? = null
     return ImageAnalysis.Analyzer { proxy ->
+        if (!active.get()) {
+            proxy.close()
+            return@Analyzer
+        }
         val media = proxy.image
         if (media == null) {
             fusion.reset()
@@ -399,6 +438,7 @@ private fun faceAnalyzer(
         }
         faceDetector.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
             .addOnSuccessListener { faces ->
+                if (!active.get()) return@addOnSuccessListener
                 val face = faces.singleOrNull()
                 if (face == null || face.trackingId == null || trackedFace != face.trackingId) fusion.reset()
                 trackedFace = face?.trackingId
@@ -406,21 +446,27 @@ private fun faceAnalyzer(
                 if (face != null && classifier != null) {
                     // A failed crop/score breaks continuity; it cannot retain live evidence.
                     runCatching {
-                        proxy.toBitmap().let { frame ->
-                            val box = FaceBox(
-                                face.boundingBox.left, face.boundingBox.top,
-                                face.boundingBox.right, face.boundingBox.bottom,
-                            )
-                            val crop = spoofCropRect(box, frame.width, frame.height)
-                            val cropped = Bitmap.createBitmap(
-                                frame, crop.left, crop.top,
-                                crop.width.coerceAtLeast(1), crop.height.coerceAtLeast(1),
-                            )
-                            val scaled = Bitmap.createScaledBitmap(
-                                cropped, SpoofModel.INPUT_SIDE, SpoofModel.INPUT_SIDE, true
-                            )
-                            verdict = classifier.classify(scaled)
-                        }
+                        val raw = proxy.toBitmap()
+                        // ML Kit's boxes use the rotated input coordinates.
+                        // CameraX's bitmap still uses the sensor orientation.
+                        val frame = Bitmap.createBitmap(
+                            raw, 0, 0, raw.width, raw.height,
+                            Matrix().apply { postRotate(proxy.imageInfo.rotationDegrees.toFloat()) },
+                            true,
+                        )
+                        val box = FaceBox(
+                            face.boundingBox.left, face.boundingBox.top,
+                            face.boundingBox.right, face.boundingBox.bottom,
+                        )
+                        val crop = spoofCropRect(box, frame.width, frame.height)
+                        val cropped = Bitmap.createBitmap(
+                            frame, crop.left, crop.top,
+                            crop.width.coerceAtLeast(1), crop.height.coerceAtLeast(1),
+                        )
+                        val scaled = Bitmap.createScaledBitmap(
+                            cropped, SpoofModel.INPUT_SIDE, SpoofModel.INPUT_SIDE, true
+                        )
+                        verdict = classifier.classify(scaled)
                     }
                 }
                 if (classifier != null) fusion.observe(verdict)
@@ -436,6 +482,7 @@ private fun faceAnalyzer(
                 )
             }
             .addOnFailureListener {
+                if (!active.get()) return@addOnFailureListener
                 fusion.reset()
                 onSample(null)
             }

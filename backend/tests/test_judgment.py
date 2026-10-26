@@ -2,6 +2,7 @@
 $SKR payout, reroute, and the agreement-floor slash trigger."""
 
 import base64
+import hashlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -451,6 +452,80 @@ def test_direct_submission_requires_liveness_even_with_bond(pilot):
     assert not chain.reservations and not chain.settled_skr
     settings.liveness_required = False
     assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 200
+
+
+@pytest.mark.parametrize("result_digest", [
+    "deadbeef" * 8,  # Exact Continue (demo) payload in LivenessScreen.kt.
+    hashlib.sha256(b"v2|BLINK|PASSED|10|10|0|10|0|live").hexdigest(),
+])
+def test_liveness_completion_persists_and_unblocks_judging(pilot, result_digest):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = True
+    wallet = str(keys[0].pubkey())
+    bond(c, h[0])
+    pid = seed_pair(app)
+    assert c.get("/me", headers=h[0]).json()["liveness_completed"] is False
+    assert c.get("/judge/next", headers=h[0]).json()["kind"] == "none"
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 403
+
+    issued = c.post("/liveness/session", headers=h[0], json={
+        "contributor": wallet, "task_id": "capture-session",
+    })
+    assert issued.status_code == 200, issued.text
+    session = issued.json()
+    assert session["challenge"] in {"blink", "turn_left", "turn_right", "smile"}
+    body = {
+        "contributor": wallet, "session_id": session["session_id"],
+        "result_digest": result_digest,
+    }
+    completed = c.post("/liveness/complete", headers=h[0], json=body)
+    assert completed.status_code == 200, completed.text
+    assert len(bytes.fromhex(completed.json()["liveness_proof_hash"])) == 32
+    with app.state.database.transaction() as db:
+        assert db.get(Actor, wallet).liveness_completed is True
+    assert c.get("/me", headers=h[0]).json()["liveness_completed"] is True
+    assert c.get("/me", headers=h[1]).json()["liveness_completed"] is False
+    assert c.get("/judge/next", headers=h[0]).json()["pair_id"] == pid
+    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 200
+    assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 409
+
+
+@pytest.mark.parametrize("result_digest", ["00" * 32, "not-hex"])
+def test_invalid_liveness_result_keeps_gate_closed_and_allows_retry(pilot, result_digest):
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = True
+    wallet = str(keys[0].pubkey())
+    session = c.post("/liveness/session", headers=h[0], json={
+        "contributor": wallet, "task_id": "capture-session",
+    }).json()
+    body = {
+        "contributor": wallet, "session_id": session["session_id"],
+        "result_digest": result_digest,
+    }
+    assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 400
+    assert c.get("/me", headers=h[0]).json()["liveness_completed"] is False
+    body["result_digest"] = "deadbeef" * 8
+    assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 200
+
+
+def test_expired_liveness_session_can_be_replaced(pilot):
+    from dataclasses import replace
+    from seeker.api import liveness_sessions
+
+    c, app, h, keys, chain, settings = pilot
+    wallet = str(keys[0].pubkey())
+    request = {"contributor": wallet, "task_id": "capture-session"}
+    session = c.post("/liveness/session", headers=h[0], json=request).json()
+    store = liveness_sessions()
+    sid = session["session_id"]
+    store._sessions[sid] = replace(store.get(wallet, sid), expires_at=0)
+    body = {"contributor": wallet, "session_id": sid, "result_digest": "deadbeef" * 8}
+    assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 410
+    assert c.get("/me", headers=h[0]).json()["liveness_completed"] is False
+    replacement = c.post("/liveness/session", headers=h[0], json=request).json()
+    body["session_id"] = replacement["session_id"]
+    assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 200
+    assert c.get("/me", headers=h[0]).json()["liveness_completed"] is True
 
 
 def test_retry_after_mint_confirmation_loss_does_not_deadlock_or_double_pay(pilot):

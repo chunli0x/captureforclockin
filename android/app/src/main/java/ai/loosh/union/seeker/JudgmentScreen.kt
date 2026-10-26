@@ -43,6 +43,20 @@ fun JudgmentScreen(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit, onPro
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             EditorialHeading("JUDGE.")
+            // Liveness is an account prerequisite, independent of pair availability.
+            // Put it before the guidance/stats so it is visible on a phone at sign-in.
+            if (!s.livenessCompleted) {
+                CapturePanel(Modifier.fillMaxWidth(), elevated = true) {
+                    Text("Prove you're human", style = MaterialTheme.typography.titleMedium, color = CaptureInk)
+                    Text(
+                        "A quick on-device motion check. Images are processed on-device and not retained.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MutedGray,
+                    )
+                    ActionButton("Prove you're human", onClick = onProveHuman, enabled = !s.busy)
+                }
+                return@Column
+            }
             JudgeGuidanceCard()
             Text(
                 "Compare two model outputs and pick the better one. Consensus-aligned judges earn " +
@@ -53,7 +67,7 @@ fun JudgmentScreen(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit, onPro
             )
             JudgeStatsCard(s)
             if (s.judgePair == null) {
-                EmptyCard(s, vm, onBond, onProveHuman)
+                EmptyCard(s, vm, onBond)
             } else {
                 PairCard(s, vm)
             }
@@ -109,18 +123,9 @@ private fun JudgeStatsCard(s: PilotState) {
 }
 
 @Composable
-private fun EmptyCard(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit, onProveHuman: () -> Unit) {
+private fun EmptyCard(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit) {
     CapturePanel(Modifier.fillMaxWidth(), elevated = true) {
         when {
-            !s.livenessCompleted -> {
-                Text("Prove you're human", style = MaterialTheme.typography.titleMedium, color = CaptureInk)
-                Text(
-                    "A quick on-device motion check (e.g. blink or turn your head). Images are processed on-device and not retained.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MutedGray,
-                )
-                ActionButton("Prove you're human", onClick = onProveHuman, enabled = !s.busy)
-            }
             !s.bonded -> {
                 Text("No pairs to judge right now", style = MaterialTheme.typography.titleMedium, color = CaptureInk)
                 ActionButton("Deposit the SKR bond", onClick = onBond)
