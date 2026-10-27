@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from seeker.api import create_app
 from seeker.config import Settings
-from seeker.db import Actor, Base, CalibrationPair, Judgment, JudgmentBatch, JudgmentPair
+from seeker.db import Actor, CalibrationPair, Judgment, JudgmentBatch, JudgmentPair
 from seeker.chain import ChainUnavailable
 from seeker.judge_leveling import level_for, rate_multiplier
 from seeker import judgment as judgment_mod
@@ -97,9 +97,12 @@ def pilot(tmp_path):
         skr_mint=str(Keypair().pubkey()),
         verifier_key_file=tmp_path / "unused",
     )
+    from seeker.db import connect
+    from seeker.migrate import apply_migrations
+    engine = connect(settings.database_url)
+    apply_migrations(engine)
+    engine.dispose()
     app = create_app(settings, chain=chain)
-    Base.metadata.drop_all(app.state.database.engine)
-    Base.metadata.create_all(app.state.database.engine)
     c = TestClient(app)
     keys = [Keypair() for _ in range(4)]
     h = []
@@ -647,7 +650,8 @@ def test_migration_preserves_legacy_votes_and_reserves_before_consensus(pilot):
     # Emulate an accepted pre-upgrade judgment, then apply the migration twice.
     with app.state.database.engine.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE judgments DROP COLUMN liability_legacy")
-    assert apply_migrations(app.state.database.engine) == 1
+        conn.exec_driver_sql("DELETE FROM schema_versions WHERE version >= '0015'")
+    assert apply_migrations(app.state.database.engine) == 2
     assert apply_migrations(app.state.database.engine) == 0
     with app.state.database.transaction() as db:
         assert db.query(Judgment).one().liability_legacy

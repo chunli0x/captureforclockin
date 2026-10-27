@@ -4,10 +4,12 @@
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -34,6 +36,14 @@ def now():
 
 class Base(DeclarativeBase):
     pass
+
+
+class SchemaVersion(Base):
+    __tablename__ = "schema_versions"
+    version: Mapped[str] = mapped_column(String(4), primary_key=True)
+    checksum: Mapped[str] = mapped_column(String(64))
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    build_family: Mapped[str] = mapped_column(String(8))
 
 
 class Actor(Base):

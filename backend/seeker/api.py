@@ -6,7 +6,7 @@ import secrets
 import functools
 from typing import Annotated, NoReturn
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import JSONResponse
@@ -31,7 +31,6 @@ from .db import (
     JudgmentPair,
     Login,
     Prepared,
-    Rate,
     now,
 )
 from .schemas import (
@@ -89,26 +88,18 @@ def insert_once(db, cls, values):
     db.execute(insert(cls).values(**values).on_conflict_do_nothing())
 
 
-def rate(db, key, limit, period=60):
-    key = digest(key.encode())
-    bucket = now() // period
-    insert_once(db, Rate, {"key": key, "bucket": bucket, "count": 0})
-    row = lock(db, Rate, key)
-    if row.bucket != bucket:
-        row.bucket, row.count = bucket, 0
-    if row.count >= limit:
-        fail(429, "Rate limit reached; retry later")
-    row.count += 1
-
-
 def create_app(settings: Settings, *, chain=None):
     app = FastAPI(title="Capture judgment product", version="0.1.0")
     database = Database(settings.database_url)
-    from .db import Base
-    from .migrate import apply_migrations
+    from .migrate import check_schema
+    from .rate_limit import RequestLimitsMiddleware
 
-    Base.metadata.create_all(database.engine)
-    apply_migrations(database.engine)
+    try:
+        check_schema(database.engine)
+    except Exception:
+        database.engine.dispose()
+        raise
+    app.add_middleware(RequestLimitsMiddleware, database=database, settings=settings)
     chain = chain or Chain(settings)
     app.state.database, app.state.chain = database, chain
 
@@ -154,20 +145,8 @@ def create_app(settings: Settings, *, chain=None):
             status = 503
 
         try:
-            from sqlalchemy import inspect
-
-            tables = set(inspect(database.engine).get_table_names())
-            required = {
-                "seeker_actors",
-                "seeker_prepared",
-                "judgment_pairs",
-                "judgments",
-                "calibration_pairs",
-            }
-            missing = required - tables
-            checks["schema"] = "applied" if not missing else "missing " + ",".join(sorted(missing))
-            if missing:
-                status = 503
+            check_schema(database.engine)
+            checks["schema"] = "applied"
         except Exception:
             checks["schema"] = "unavailable"
             status = 503
@@ -208,12 +187,10 @@ def create_app(settings: Settings, *, chain=None):
         )
 
     @app.post("/auth/challenge")
-    def challenge(body: Wallet, request: Request):
+    def challenge(body: Wallet):
         nonce, expires = secrets.token_hex(32), now() + 120
         message = f"{settings.domain} requests Capture judgment test-pilot sign-in.\nWallet: {body.wallet}\nNetwork: {settings.cluster}\nNonce: {nonce}\nExpires: {expires}\nThis does not authorize any token transfer."
         with database.transaction() as db:
-            rate(db, "ip:" + (request.client.host if request.client else "unknown"), 30)
-            rate(db, "login:" + body.wallet, 10)
             db.add(
                 Challenge(
                     id=nonce, wallet=body.wallet, message=message, expires=expires
@@ -279,8 +256,6 @@ def create_app(settings: Settings, *, chain=None):
         Pubkey.from_string(body.contributor)
         if body.contributor != actor.wallet:
             fail(403, "Liveness contributor must match the authenticated wallet")
-        with database.transaction() as db:
-            rate(db, "liveness-session:" + actor.wallet, 10, 3600)
         store = liveness_sessions()
         session = store.issue(actor.wallet, body.task_id)
         return {
@@ -311,7 +286,6 @@ def create_app(settings: Settings, *, chain=None):
         except LivenessError as exc:
             fail(400, str(exc))
         with database.transaction() as db:
-            rate(db, "liveness-complete:" + actor.wallet, 10, 3600)
             worker = lock(db, Actor, actor.wallet)
             worker.liveness_completed = True
         return {

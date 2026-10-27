@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     # fails closed instead of fabricating it.
     treasury_key_file: Path | None = None
     session_seconds: int = 3600
+    # Durable, shared fixed-window limits. Proxy trust is configured in uvicorn;
+    # the application never accepts X-Forwarded-For directly.
+    rate_global_per_minute: int = Field(default=3000, gt=0)
+    rate_ip_per_minute: int = Field(default=300, gt=0)
+    rate_wallet_per_minute: int = Field(default=120, gt=0)
+    rate_auth_ip_per_minute: int = Field(default=30, gt=0)
+    rate_expensive_ip_per_minute: int = Field(default=120, gt=0)
+    max_request_body_bytes: int = Field(default=16_384, gt=0)
+    max_request_head_bytes: int = Field(default=16_384, gt=0)
+    request_body_timeout_seconds: float = Field(default=10.0, gt=0)
     min_bond: int = Field(default=1_000_000, gt=0, le=1_000_000_000_000)
     # The devnet faucet also drops a little SOL so the worker can pay the
     # deposit transaction fee and the bond/vault rent (the deposit is

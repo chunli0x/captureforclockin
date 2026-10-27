@@ -1,83 +1,134 @@
-"""Apply Seeker schema: create_all for fresh DBs plus numbered, idempotent
-column migrations for upgrades. Run `python -m seeker.migrate`."""
+"""Explicit, transactional schema migration: python -m seeker.migrate.
 
-import importlib.util
+Existing 0011–0015 columns are baselined only after their idempotent upgrade
+has succeeded. Checksums cover the exact bytes of each immutable migration.
+"""
+
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select, text
 
 from .config import Settings
-from .db import Base, connect
+from .db import Base, SchemaVersion, connect
 
+BUILD_FAMILY = "SKR"
+REQUIRED_VERSION = "0016"
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
-
-# Legacy USDC -> SKR column renames. Rename USDC-era columns (preserving
-# balances) before the ADD COLUMN pass. Existing SKR-era databases already
-# have the correct names and need no rename.
-RENAMES = [
-    ("seeker_actors", "usdc_funded", "skr_funded"),
-    ("seeker_actors", "staked_usdc", "staked_skr"),
-    ("judgments", "earned_usdc", "earned_skr"),
-    ("judgments", "settled_usdc", "settled_skr"),
-]
 
 
 def _numbered_migrations():
-    """Yield (migration_id, columns) for every NNNN_*.py module in migrations/,
-    in filename order. Each module exposes a COLUMNS list of
-    (table, column, ddl) triples."""
-    for path in sorted(MIGRATIONS_DIR.glob("[0-9]*.py")):
-        spec = importlib.util.spec_from_file_location(
-            "seeker_migrations_" + path.stem, path
-        )
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        yield path.stem, module.COLUMNS
+    migrations = []
+    for path in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.py")):
+        source = path.read_bytes()
+        namespace = {}
+        exec(compile(source, str(path), "exec"), namespace)
+        migrations.append((path.name[:4], hashlib.sha256(source).hexdigest(), namespace["COLUMNS"]))
+    versions = [version for version, _, _ in migrations]
+    expected = [f"{version:04d}" for version in range(11, int(REQUIRED_VERSION) + 1)]
+    if versions != expected:
+        raise RuntimeError("Invalid migration manifest / required version")
+    return migrations
+
+
+def _identity(conn):
+    """Reject the other deployment even before adopting a pre-ledger database.
+
+    The former cross-token renames are deliberately prohibited: deployment is not
+    an authorization to convert balances between token families.
+    """
+    other = "usdc" if BUILD_FAMILY == "SKR" else "skr"
+    inspector = inspect(conn)
+    for table, columns in (
+        ("seeker_actors", {f"{other}_funded", f"staked_{other}"}),
+        ("judgments", {f"earned_{other}", f"settled_{other}"}),
+    ):
+        if inspector.has_table(table):
+            if columns & {c["name"] for c in inspector.get_columns(table)}:
+                raise RuntimeError(f"Schema build family mismatch: {BUILD_FAMILY} build cannot use {other.upper()} columns")
+
+
+def _ledger(conn, migrations):
+    if not inspect(conn).has_table("schema_versions"):
+        return {}
+    rows = {row.version: row for row in conn.execute(select(SchemaVersion.__table__))}
+    checksums = {version: checksum for version, checksum, _ in migrations}
+    for version, row in rows.items():
+        if row.build_family != BUILD_FAMILY:
+            raise RuntimeError(f"Schema build family mismatch: expected {BUILD_FAMILY}, found {row.build_family}")
+        if version not in checksums:
+            raise RuntimeError(f"Schema version {version} is not supported by this build")
+        if row.checksum != checksums[version]:
+            raise RuntimeError(f"Schema migration {version} checksum mismatch; restore the original migration")
+    return rows
+
+
+def _check_columns(conn):
+    inspector = inspect(conn)
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            raise RuntimeError(f"schema not applied — run migrations: missing table {table.name} (python -m seeker.migrate)")
+        missing = set(table.columns.keys()) - {c["name"] for c in inspector.get_columns(table.name)}
+        if missing:
+            raise RuntimeError(f"schema not applied — run migrations: missing {table.name} columns {sorted(missing)}")
+
+
+def check_schema(engine):
+    """Read-only startup/readiness check. No create_all, ALTER or ledger writes."""
+    migrations = _numbered_migrations()
+    with engine.connect() as conn:
+        rows = _ledger(conn, migrations)
+        _identity(conn)
+        missing = [v for v, _, _ in migrations if v not in rows]
+        if missing:
+            raise RuntimeError(
+                f"schema not applied — run migrations: {BUILD_FAMILY} requires {REQUIRED_VERSION}; "
+                f"missing {', '.join(missing)} (python -m seeker.migrate)"
+            )
+        _check_columns(conn)
 
 
 def apply_migrations(engine):
-    """Idempotently apply every numbered migration. A column is added with
-    ``ALTER TABLE … ADD COLUMN`` only when it is absent, so an existing phase-1
-    DB upgrades cleanly and re-running is a no-op. Works on both SQLite and
-    PostgreSQL."""
-    applied = 0
-    for table, old, new in RENAMES:
-        inspector = inspect(engine)
-        if not inspector.has_table(table):
-            continue
-        cols = {c["name"] for c in inspector.get_columns(table)}
-        if old in cols and new not in cols:
-            with engine.begin() as conn:
-                conn.exec_driver_sql(
-                    f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
-                )
-            applied += 1
-    for migration_id, columns in _numbered_migrations():
-        for table, column, ddl in columns:
-            inspector = inspect(engine)
-            if not inspector.has_table(table):
-                # Fresh DBs get the column via create_all; a table absent here
-                # means there is nothing to upgrade for this column.
-                continue
-            if column in {c["name"] for c in inspector.get_columns(table)}:
-                continue
-            with engine.begin() as conn:
-                conn.exec_driver_sql(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"
-                )
-            applied += 1
-    return applied
+    """Return the number of newly recorded versions; reruns are a safe no-op.
+
+    All DDL and ledger rows commit together. PostgreSQL migrators serialize on a
+    transaction advisory lock shared across both builds; SQLite uses BEGIN IMMEDIATE.
+    """
+    migrations = _numbered_migrations()
+    with engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            conn.execute(text("SELECT pg_advisory_xact_lock(1936024939)"))
+        rows = _ledger(conn, migrations)
+        _identity(conn)
+        pending = [m for m in migrations if m[0] not in rows]
+        if not pending:
+            _check_columns(conn)
+            return 0
+        # Bootstrap missing tables only in the explicit migrator. Existing
+        # tables still require the numbered ALTERs below.
+        Base.metadata.create_all(conn)
+        for version, checksum, columns in pending:
+            for table, column, ddl in columns:
+                existing = {c["name"] for c in inspect(conn).get_columns(table)}
+                if column not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            conn.execute(SchemaVersion.__table__.insert().values(
+                version=version, checksum=checksum,
+                applied_at=datetime.now(timezone.utc), build_family=BUILD_FAMILY,
+            ))
+        _check_columns(conn)
+        return len(pending)
 
 
 def main():
     settings = Settings()
     engine = connect(settings.database_url)
-    # create_all is additive and idempotent; numbered migrations handle the rest.
-    Base.metadata.create_all(engine)
-    apply_migrations(engine)
-    print("Seeker schema applied (create_all + numbered migrations)")
+    try:
+        applied = apply_migrations(engine)
+        print(f"{BUILD_FAMILY} schema {REQUIRED_VERSION}: {applied} migration version(s) recorded")
+    finally:
+        engine.dispose()
 
 
 if __name__ == "__main__":
