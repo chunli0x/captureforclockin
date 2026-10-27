@@ -1,6 +1,6 @@
 Audit of the Capture liveness flow, 2026-10-26. Finding locations below refer to
-the pre-fix source at commit `73dd351`; Android paths are relative to
-`android/app/src/main/java/ai/loosh/union/`.
+the pre-fix source at commit `73dd351`; Android paths use the current package root,
+`android/app/src/main/java/app/capture/`.
 
 The supplied log evidence locates the reported incident before session creation:
 neither liveness endpoint was called. The checked-in backend returns

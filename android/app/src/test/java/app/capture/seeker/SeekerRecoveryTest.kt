@@ -1,4 +1,4 @@
-package ai.loosh.union.seeker
+package app.capture.seeker
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

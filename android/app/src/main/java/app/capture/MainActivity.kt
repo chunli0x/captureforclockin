@@ -1,4 +1,4 @@
-package ai.loosh.union
+package app.capture
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    ai.loosh.union.seeker.SeekerApp(sender)
+                    app.capture.seeker.SeekerApp(sender)
                 }
             }
         }

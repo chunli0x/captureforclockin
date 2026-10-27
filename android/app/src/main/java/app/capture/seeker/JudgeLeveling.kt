@@ -1,4 +1,4 @@
-package ai.loosh.union.seeker
+package app.capture.seeker
 
 import kotlin.math.roundToInt
 

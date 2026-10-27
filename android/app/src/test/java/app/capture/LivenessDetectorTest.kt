@@ -1,4 +1,4 @@
-package ai.loosh.union
+package app.capture
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals

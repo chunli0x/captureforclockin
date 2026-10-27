@@ -1,4 +1,4 @@
-package ai.loosh.union.seeker
+package app.capture.seeker
 
 /**
  * The wallet sign-in verify payload. [over18] is a self-declared age

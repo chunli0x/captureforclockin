@@ -1,7 +1,7 @@
-package ai.loosh.union.seeker
+package app.capture.seeker
 
-import ai.loosh.union.CaptureBase
-import ai.loosh.union.R
+import app.capture.CaptureBase
+import app.capture.R
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box

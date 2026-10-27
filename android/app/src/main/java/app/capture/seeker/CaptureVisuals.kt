@@ -1,6 +1,6 @@
-package ai.loosh.union.seeker
+package app.capture.seeker
 
-import ai.loosh.union.*
+import app.capture.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -33,7 +33,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import ai.loosh.union.R
+import app.capture.R
 import kotlin.math.*
 
 /** Applied once at each screen root; cards never repeat the canvas gradient. */

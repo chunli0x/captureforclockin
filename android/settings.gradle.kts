@@ -12,5 +12,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Union"
+rootProject.name = "Capture"
 include(":app")

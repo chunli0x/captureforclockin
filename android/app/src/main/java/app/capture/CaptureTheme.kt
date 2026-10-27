@@ -1,4 +1,4 @@
-package ai.loosh.union
+package app.capture
 
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing

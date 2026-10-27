@@ -63,11 +63,11 @@ tasks.configureEach {
 }
 
 android {
-    namespace = "ai.loosh.union"
+    namespace = "app.capture"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "ai.loosh.union"
+        applicationId = "app.capture"
         minSdk = 26
         targetSdk = 37
         versionCode = 2

@@ -1,9 +1,9 @@
-package ai.loosh.union.seeker
+package app.capture.seeker
 
-import ai.loosh.union.CaptureAccentBright
-import ai.loosh.union.CaptureInk
-import ai.loosh.union.MutedGray
-import ai.loosh.union.SuccessGreen
+import app.capture.CaptureAccentBright
+import app.capture.CaptureInk
+import app.capture.MutedGray
+import app.capture.SuccessGreen
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
