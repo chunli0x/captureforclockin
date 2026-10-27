@@ -18,6 +18,26 @@ val releaseSecrets = Properties().apply {
 fun releaseValue(name: String, env: String): String? =
     providers.environmentVariable(env).orNull ?: releaseSecrets.getProperty(name)
 
+// Local-only crash configuration; no SDK starts without explicit residency approval.
+val crashConfig = Properties().apply {
+    val source = rootProject.file("crash-reporting.properties")
+    if (source.isFile) source.inputStream().use { load(it) }
+}
+val crashDsn = crashConfig.getProperty("dsn", "").trim()
+val crashResidencyApproved = crashConfig.getProperty("residencyApproved", "false") == "true"
+require(crashDsn.none { it == '"' || it == '\\' || it.isISOControl() }) {
+    "Invalid crash DSN characters"
+}
+require(crashDsn.isEmpty() || crashResidencyApproved) {
+    "Confirm crash processor terms and data residency before configuring a DSN"
+}
+if (crashDsn.isNotEmpty()) {
+    val uri = URI(crashDsn)
+    require(uri.scheme == "https" && !uri.host.isNullOrBlank() &&
+        !uri.userInfo.isNullOrBlank() && uri.query == null && uri.fragment == null &&
+        uri.path.matches(Regex("/[0-9]+"))) { "Crash reporting requires a valid HTTPS Sentry DSN" }
+}
+
 val apiBase = providers.gradleProperty("seekerApiBase")
     .orElse(providers.environmentVariable("SEEKER_API_BASE")).orNull
 val releaseStore = releaseValue("storeFile", "SEEKER_KEYSTORE_FILE")?.let { rootProject.file(it) }
@@ -76,6 +96,7 @@ android {
         val seekerBase = apiBase ?: "http://10.0.2.2:8001"
         require(seekerBase.none { it == '"' || it == '\\' || it.isISOControl() })
         buildConfigField("String", "SEEKER_API_BASE", "\"$seekerBase\"")
+        buildConfigField("String", "SENTRY_DSN", "\"\"")
 
         // Ship a single-ABI debug APK (arm64) so the installer doesn't choke on
         // a large multi-arch bundle. The Seeker and every modern phone are arm64.
@@ -106,7 +127,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            buildConfigField("String", "SENTRY_DSN", "\"$crashDsn\"")
             signingConfig = signingConfigs.getByName("release")
         }
     }
@@ -127,6 +151,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(libs.sentry.android.core)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

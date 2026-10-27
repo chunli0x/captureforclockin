@@ -1,0 +1,5 @@
+# Copy to crash-reporting.properties (ignored). Empty DSN disables reporting.
+# Use a separate Sentry project for each app. Confirm processor terms and region
+# with the privacy owner before setting residencyApproved=true. See docs/ANDROID-HARDENING.md.
+dsn=
+residencyApproved=false

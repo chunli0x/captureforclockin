@@ -28,11 +28,14 @@ mlkitFace = "16.1.7"
 # release without that split.
 litert = "2.1.5"
 junit = "4.13.2"
+sentry = "8.60.0"
 # Media3 (ExoPlayer) for action-clip playback in the Seeker editor. Pinned to
 # 1.9.0 to match the transitive media3-* the CameraX video stack already pulls.
 media3 = "1.9.0"
 
 [libraries]
+# Core only: no replay, NDK dumps, HTTP or logging integrations.
+sentry-android-core = { group = "io.sentry", name = "sentry-android-core", version.ref = "sentry" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }

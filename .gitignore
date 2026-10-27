@@ -18,6 +18,7 @@ backend/verifier.dev.json
 
 # Android / Gradle
 android/.gradle/
+android/.kotlin/
 android/build/
 android/app/build/
 android/local.properties
@@ -49,3 +50,7 @@ seed_images/
 android/signing.properties
 *.jks
 *.keystore
+
+# Local Android signing and crash reporting configuration.
+android/keystore/
+android/crash-reporting.properties
