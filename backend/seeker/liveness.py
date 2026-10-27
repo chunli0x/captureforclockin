@@ -45,7 +45,7 @@ from enum import Enum
 # computed for some other purpose over the same bytes, and the attestation
 # program's "reject a hash I have seen" check would be reasoning about the
 # wrong thing.
-PROOF_DOMAIN = b"union.liveness.v1"
+PROOF_DOMAIN = b"capture.liveness.v1"
 
 # How long a challenge stays answerable. Long enough to read the prompt and
 # blink, short enough that a captured session is not a durable asset.

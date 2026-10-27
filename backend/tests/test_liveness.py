@@ -95,7 +95,7 @@ class TestProofHashBinding:
             )
             != naive
         )
-        assert PROOF_DOMAIN == b"union.liveness.v1"
+        assert PROOF_DOMAIN == b"capture.liveness.v1"
 
     def test_the_hash_is_32_bytes(self):
         digest = proof_hash(
