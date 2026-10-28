@@ -18,7 +18,7 @@ from seeker.chain import Chain, ChainUnavailable, discriminator
 from seeker.db import Actor, Job
 from seeker.signing_chain import SigningChain
 from seeker.worker import Worker, MAX_ATTEMPTS
-from test_judgment import pilot, run_work, seed_pair
+from test_judgment import pilot_database_url, pilot, run_work, seed_pair
 
 
 def signer_settings(settings, tmp_path):

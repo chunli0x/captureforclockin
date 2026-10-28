@@ -3,7 +3,7 @@ on:
   push:
     branches: ["seeker/**"]
   pull_request:
-    paths: ["backend/seeker/**", "backend/tests/test_seeker*", "programs/seeker-bounty/**", "android/**", ".github/workflows/seeker.yml"]
+    paths: ["backend/seeker/**", "backend/tests/**", "programs/seeker-bounty/**", "android/**", ".github/workflows/seeker.yml"]
 jobs:
   postgres:
     runs-on: ubuntu-latest
@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements-seeker.txt && pip check
-      - run: pytest -q tests/test_seeker_flow.py tests/test_seeker_chain.py tests/test_seeker_audit_concurrency.py tests/test_seeker_slash.py tests/test_bond_gate.py
+      - run: pytest -q tests/test_attestation.py tests/test_durability.py tests/test_judgment.py tests/test_liveness.py tests/test_outbox.py tests/test_seeker_chain.py tests/test_seeker_runtime.py tests/test_signer_separation.py
         env:
           SEEKER_TEST_DATABASE: postgresql+psycopg://seeker_test:test_only@localhost:5432/seeker_test
   program:

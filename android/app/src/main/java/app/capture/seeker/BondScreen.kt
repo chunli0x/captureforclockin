@@ -55,6 +55,8 @@ fun BondScreen(
                 color = MutedGray,
                 textAlign = TextAlign.Center,
             )
+            OperationError(s, onRetry = vm::refresh)
+            PendingTransactions(s, vm)
             BondCard(s, vm, sender)
             if (s.bonded)
                 Button(onClick = onBack, enabled = !s.busy, modifier = Modifier.fillMaxWidth()) {

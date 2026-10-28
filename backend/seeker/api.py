@@ -7,7 +7,7 @@ import secrets
 import functools
 from typing import Annotated, NoReturn
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import JSONResponse
@@ -451,7 +451,9 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
         }
 
     @app.get("/judge/next")
-    def judge_next(actor: Auth):
+    def judge_next(actor: Auth, exclude_pair_id: Annotated[list[str] | None, Query()] = None):
+        # Unpaid, request-scoped exclusions: no vote, liability, or payout is created.
+        # Clients retain skipped IDs across subsequent fetches in this session.
         with database.transaction() as db:
             actor = lock(db, Actor, actor.wallet)
             if settings.liveness_required and not liveness_fresh(actor):
@@ -468,6 +470,7 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
                 .where(
                     JudgmentPair.status.in_(["open", "collecting", "rerouted"]),
                     JudgmentPair.pair_id.not_in(done),
+                    JudgmentPair.pair_id.not_in(exclude_pair_id or []),
                 )
                 .order_by(JudgmentPair.created_at)
                 .limit(1)
@@ -704,6 +707,8 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
         # Phase 2: network I/O with no DB locks held.
         resolved = signature or chain.find_signature(prepared)
         chain.confirm(prepared, resolved)
+        # A fresh post-slash deposit resets warnings; a top-up does not.
+        warnings = chain.bond_warnings(prepared.wallet) if prepared.action == "deposit" else None
 
         # Phase 3: re-acquire the lock and write atomically, tolerating a
         # concurrent confirmation that landed between phases.
@@ -718,6 +723,7 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
             if p.action == "deposit":
                 worker = lock(db, Actor, p.wallet)
                 worker.bonded = True
+                worker.warnings = min(warnings, 2)
                 worker.staked_skr = settings.min_bond
             elif p.action == "withdraw":
                 worker = lock(db, Actor, p.wallet)

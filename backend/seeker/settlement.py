@@ -297,6 +297,7 @@ class Settlement:
                 return
         signature = p.signature or self.chain.find_signature(p)
         self.chain.confirm(p, signature)
+        warnings = self.chain.bond_warnings(p.wallet) if p.action == "deposit" else None
         with self.transaction() as db:
             actor = lock(db, Actor, p.wallet)
             row = lock(db, Prepared, pid)
@@ -304,4 +305,6 @@ class Settlement:
                 return
             row.signature, row.confirmed = signature, True
             actor.bonded = row.action == "deposit"
+            if actor.bonded:
+                actor.warnings = min(warnings, 2)
             actor.staked_skr = self.settings.min_bond if actor.bonded else 0

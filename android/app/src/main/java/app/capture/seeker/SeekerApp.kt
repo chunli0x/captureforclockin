@@ -128,7 +128,7 @@ fun SeekerApp(sender: ActivityResultSender, vm: SeekerViewModel = viewModel()) {
                     }
                 }
                 showBond -> BondScreen(s, vm, sender, onBack = { showBond = false })
-                showBalances -> BalanceScreen(s, vm, onBack = { showBalances = false })
+                showBalances -> BalanceScreen(s, vm, sender, onBack = { showBalances = false })
                 showCalibration -> CalibrationScreen(s, vm, onBack = { showCalibration = false })
                 else -> JudgmentScreen(
                     s,

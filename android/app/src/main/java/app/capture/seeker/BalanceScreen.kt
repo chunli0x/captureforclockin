@@ -7,6 +7,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlin.math.floor
@@ -23,7 +25,8 @@ fun formatToken(units: Long): String {
 /** The balances page: what a judge has earned (\$SKR) and staked (\$SKR), plus the
  *  level ladder. Test tokens on devnet, not real value. */
 @Composable
-fun BalanceScreen(s: PilotState, vm: SeekerViewModel, onBack: () -> Unit) {
+fun BalanceScreen(s: PilotState, vm: SeekerViewModel, sender: ActivityResultSender, onBack: () -> Unit) {
+    LaunchedEffect(Unit) { vm.refresh() }
     NavyBackground(Modifier.fillMaxSize().captureScreenMotion()) {
         Column(
             Modifier
@@ -40,7 +43,13 @@ fun BalanceScreen(s: PilotState, vm: SeekerViewModel, onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MutedGray,
             )
+            OperationError(s, onRetry = vm::refresh)
             BalanceCard(s)
+            PendingTransactions(s, vm)
+            SecondaryButton("Withdraw bond", onClick = { vm.transact("/bond/withdraw", sender) },
+                enabled = !s.busy && s.bonded && s.judgeWarnings == 0)
+            Text("Withdrawal requires a clean bond, no pending judgments, and an elapsed cooldown.",
+                style = MaterialTheme.typography.bodySmall, color = MutedGray)
             JudgeTierLadder(s.judgeLevel)
             SecondaryButton("Refresh", onClick = { vm.refresh() }, enabled = !s.busy)
             ActionButton("Back to judging", onClick = onBack)

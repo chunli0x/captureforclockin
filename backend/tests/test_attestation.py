@@ -10,7 +10,7 @@ from seeker.attestation import (
     verify_wallet_proof,
 )
 from seeker.db import Actor, now
-from test_judgment import pilot, bond, seed_pair
+from test_judgment import pilot_database_url, pilot, bond, seed_pair
 
 
 def complete(c, headers, wallet, digest="12" * 32, **extra):

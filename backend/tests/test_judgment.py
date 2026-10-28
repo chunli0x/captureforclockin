@@ -3,6 +3,8 @@ $SKR payout, reroute, and the agreement-floor slash trigger."""
 
 import base64
 import hashlib
+import os
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -87,10 +89,33 @@ class FakeChain:
 
 
 @pytest.fixture
-def pilot(tmp_path):
+def pilot_database_url(tmp_path):
+    url = os.environ.get("SEEKER_TEST_DATABASE")
+    if not url:
+        yield "sqlite:///" + str(tmp_path / "judge.db")
+        return
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.schema import CreateSchema, DropSchema
+    parsed = make_url(url)
+    assert parsed.get_backend_name() == "postgresql", "CI concurrency coverage requires Postgres"
+    schema = "test_" + uuid.uuid4().hex
+    admin = create_engine(url)
+    with admin.begin() as conn:
+        conn.execute(CreateSchema(schema))
+    try:
+        yield parsed.update_query_dict({"options": f"-csearch_path={schema}"}).render_as_string(hide_password=False)
+    finally:
+        with admin.begin() as conn:
+            conn.execute(DropSchema(schema, cascade=True))
+        admin.dispose()
+
+
+@pytest.fixture
+def pilot(tmp_path, pilot_database_url):
     chain = FakeChain()
     settings = Settings(
-        database_url="sqlite:///" + str(tmp_path / "judge.db"),
+        database_url=pilot_database_url,
         local_sqlite=True,
         domain="pilot.test",
         program_id=str(Keypair().pubkey()),
@@ -750,3 +775,93 @@ def test_second_resolution_slashes_once_and_slashed_judge_can_reconcile(pilot):
     assert submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "b"}).status_code == 202
     assert chain.issued.count(("warn", wallet, None)) == 2
     assert chain.issued.count(("slash", wallet, None)) == 1
+
+
+@pytest.mark.parametrize("mode", ["confirm", "reconcile", "worker"])
+@pytest.mark.parametrize("on_chain_warnings", [0, 1, 2, 255])
+def test_deposit_reconciles_warning_mirror(pilot, mode, on_chain_warnings):
+    c, app, h, keys, chain, settings = pilot
+    wallet = str(keys[0].pubkey())
+    with app.state.database.transaction() as db:
+        actor = db.get(Actor, wallet)
+        actor.skr_funded = True
+        actor.warnings = 2
+    prepared = c.post("/bond/deposit", headers=h[0]).json()
+    chain.worker_warnings[wallet] = on_chain_warnings
+    path = f"/transactions/{prepared['id']}/{mode}"
+    payload = {"signature": str(keys[0].sign_message(b"deposit"))} if mode == "confirm" else {}
+    if mode == "worker":
+        run_work(app)
+    else:
+        response = c.post(path, headers=h[0], json=payload)
+        assert response.status_code == 200, response.text
+    with app.state.database.transaction() as db:
+        actor = db.get(Actor, wallet)
+        assert actor.bonded and actor.staked_skr == settings.min_bond
+        assert actor.warnings == min(on_chain_warnings, 2)
+    for route in ("/bond/withdraw", "/bond/withdraw/prepare"):
+        assert c.post(route, headers=h[0]).status_code == (200 if on_chain_warnings == 0 else 403)
+    # Replaying an already-confirmed deposit must not clear a newer warning.
+    with app.state.database.transaction() as db:
+        db.get(Actor, wallet).warnings = 1
+    chain.worker_warnings[wallet] = 0
+    assert c.post(f"/transactions/{prepared['id']}/reconcile", headers=h[0]).status_code == 200
+    assert c.get("/me", headers=h[0]).json()["warnings"] == 1
+
+
+@pytest.mark.parametrize("mode", ["confirm", "reconcile", "worker"])
+def test_deposit_warning_read_failure_does_not_confirm_or_clear_mirror(pilot, mode):
+    from seeker.db import Prepared
+    c, app, h, keys, chain, settings = pilot
+    wallet = str(keys[0].pubkey())
+    with app.state.database.transaction() as db:
+        actor = db.get(Actor, wallet)
+        actor.skr_funded, actor.warnings = True, 2
+    prepared = c.post("/bond/deposit", headers=h[0]).json()
+    original = chain.bond_warnings
+    def unavailable(wallet):
+        raise ChainUnavailable("Bond state unavailable")
+    chain.bond_warnings = unavailable
+    if mode == "worker":
+        run_work(app)
+    else:
+        payload = {"signature": str(keys[0].sign_message(b"deposit"))} if mode == "confirm" else {}
+        assert c.post(f"/transactions/{prepared['id']}/{mode}", headers=h[0], json=payload).status_code == 503
+    with app.state.database.transaction() as db:
+        assert not db.get(Prepared, prepared["id"]).confirmed
+        actor = db.get(Actor, wallet)
+        assert not actor.bonded and actor.warnings == 2
+    chain.bond_warnings = original
+    assert c.post(f"/transactions/{prepared['id']}/reconcile", headers=h[0]).status_code == 200
+    assert c.get("/me", headers=h[0]).json()["warnings"] == 0
+
+
+def test_unavailable_pair_exclusions_are_unpaid_and_request_scoped(pilot):
+    from sqlalchemy import select
+    c, app, h, keys, chain, settings = pilot
+    settings.liveness_required = False
+    with app.state.database.transaction() as db:
+        for key in keys[:2]:
+            db.get(Actor, str(key.pubkey())).bonded = True
+    ids = [seed_pair(app) for _ in range(3)]
+    excluded = []
+    for _ in ids:
+        response = c.get("/judge/next", headers=h[0], params=excluded)
+        assert response.status_code == 200, response.text
+        pair = response.json()["pair_id"]
+        assert pair not in [value for _, value in excluded]
+        excluded.append(("exclude_pair_id", pair))
+    assert c.get("/judge/next", headers=h[0], params=excluded).json()["kind"] == "none"
+    assert c.get("/judge/next", params=excluded).status_code == 401
+    # Exclusion cannot mutate a pair globally or manufacture a paid abstention.
+    assert c.get("/judge/next", headers=h[1]).json()["pair_id"] in ids
+    assert c.get("/judge/next", headers=h[0]).json()["pair_id"] in ids
+    with app.state.database.transaction() as db:
+        assert not list(db.scalars(select(Judgment)))
+        assert not list(db.scalars(select(Job)))
+        assert all(p.status == "open" for p in db.scalars(select(JudgmentPair)))
+        assert db.get(Actor, str(keys[0].pubkey())).judged_count == 0
+    assert not chain.reservations and not chain.settled_skr
+    # Submitted pairs stay excluded even when absent from the skip list.
+    assert c.post(f"/judge/{ids[0]}", headers=h[0], json={"choice": "a"}).status_code == 202
+    assert c.get("/judge/next", headers=h[0]).json()["pair_id"] != ids[0]

@@ -43,6 +43,7 @@ fun JudgmentScreen(s: PilotState, vm: SeekerViewModel, onBond: () -> Unit, onPro
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             EditorialHeading("JUDGE.")
+            OperationError(s, onRetry = vm::refresh)
             // Liveness is an account prerequisite, independent of pair availability.
             // Put it before the guidance/stats so it is visible on a phone at sign-in.
             if (!s.livenessCompleted) {
@@ -177,7 +178,7 @@ private fun PairChoice(s: PilotState, vm: SeekerViewModel) {
         }
     }
     if (failCount > 0) {
-        SecondaryButton("Couldn't load the image, try another", onClick = { vm.judgeNext() }, enabled = !s.busy)
+        SecondaryButton("Couldn't load the image, try another", onClick = { vm.skipUnavailablePair() }, enabled = !s.busy)
     }
     if (taskType == "rating") {
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),

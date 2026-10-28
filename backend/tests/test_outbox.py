@@ -13,7 +13,7 @@ from seeker.chain import ChainUnavailable
 from seeker.db import Actor, Job, Judgment, JudgmentPair, JudgmentBatch, Prepared
 from seeker.outbox import enqueue, LostLease
 from seeker.worker import Worker, MAX_ATTEMPTS
-from test_judgment import pilot, seed_pair, run_work
+from test_judgment import pilot, pilot_database_url, seed_pair, run_work
 
 
 @pytest.fixture
@@ -284,7 +284,7 @@ def test_network_never_runs_in_db_transaction_including_prepared_and_bonds(ready
     event.listen(app.state.database.engine, "commit", lambda conn: active.discard(id(conn)))
     event.listen(app.state.database.engine, "rollback", lambda conn: active.discard(id(conn)))
     for name in ("reserve_judgment", "resolve_judgment", "settle_skr", "post_batch", "faucet",
-                 "prepare", "height", "confirm", "find_signature"):
+                 "prepare", "height", "confirm", "find_signature", "bond_warnings"):
         original = getattr(chain, name)
         def checked(*args, _original=original, **kwargs):
             assert not active, "chain I/O while a DB transaction is open"

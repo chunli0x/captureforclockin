@@ -20,6 +20,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 
 private class ApiFailure(val status: Int, message: String) : java.io.IOException(message)
@@ -47,6 +48,8 @@ sealed class AsyncStatus {
     object Failure : AsyncStatus()
 }
 
+data class PendingTransaction(val id: String, val action: String)
+
 data class PilotState(
     val server: String = "",
     val wallet: String = "",
@@ -65,6 +68,8 @@ data class PilotState(
     val faucetMints: Int = 0,
     val faucetMaxMints: Int = 5,
     val pendingFaucetId: String? = null,
+    val pendingTransactions: List<PendingTransaction> = emptyList(),
+    val excludedPairIds: Set<String> = emptySet(),
     val judgeStakedSkr: Long = 0,
     val judgeWarnings: Int = 0,
     // --- Judgment product (RLHF preference judging) ---
@@ -307,6 +312,7 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
     fun depositBond(sender: ActivityResultSender) =
         run("Depositing bond", "Bond deposited") {
             val prepared = post("/bond/deposit")
+            rememberPrepared(prepared)
             val tx = Base64.decode(prepared.getString("transaction_base64"), Base64.DEFAULT)
             val result =
                 adapter.transact(sender) { auth ->
@@ -368,6 +374,12 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun judgeNext() = run("Loading next pair", "Pair loaded") { refreshJudgment() }
 
+    fun skipUnavailablePair() = run("Skipping unavailable images", "Pair skipped without payment") {
+        val id = mutable.value.judgePair?.getString("pair_id") ?: error("No pair to skip")
+        mutable.update { it.copy(excludedPairIds = it.excludedPairIds + id, judgePair = null) }
+        refreshJudgment()
+    }
+
     fun submitJudgment(choice: String? = null, rating: Int? = null) =
         run("Submitting judgment", "Judgment recorded") {
             val pair = mutable.value.judgePair ?: error("No pair to judge")
@@ -379,9 +391,27 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
             refreshJudgment()
         }
 
+    private fun rememberPrepared(prepared: JSONObject) {
+        val pending = PendingTransaction(prepared.getString("id"), prepared.getString("action"))
+        mutable.update {
+            it.copy(pendingTransactions = it.pendingTransactions.filterNot { p -> p.id == pending.id } + pending)
+        }
+    }
+
+    private suspend fun refreshTransactions() {
+        val rows = JSONArray(String(bytes("/transactions")))
+        val pending = (0 until rows.length()).map { rows.getJSONObject(it) }
+            .filterNot { it.getBoolean("confirmed") }
+            .map { PendingTransaction(it.getString("id"), it.getString("action")) }
+        mutable.update { it.copy(pendingTransactions = pending) }
+    }
+
     private suspend fun refreshJudgment() {
+        // Recovery remains available even if a subsequent judging request fails.
+        refreshTransactions()
         val me = get("/me")
-        val next = get("/judge/next")
+        val exclusions = mutable.value.excludedPairIds.joinToString("&") { "exclude_pair_id=${Uri.encode(it)}" }
+        val next = get("/judge/next" + if (exclusions.isEmpty()) "" else "?$exclusions")
         val stats = get("/judge/stats")
         val level = stats.optInt("level", 0).coerceIn(0, MAX_JUDGE_LEVEL)
         val progress = stats.optJSONObject("calibration_progress")
@@ -423,6 +453,7 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
     fun transact(path: String, sender: ActivityResultSender) =
         run("Review this transaction in Seeker Wallet", "Transaction confirmed") {
             val prepared = post("$path/prepare")
+            rememberPrepared(prepared)
             val tx = Base64.decode(prepared.getString("transaction_base64"), Base64.DEFAULT)
             val result =
                 adapter.transact(sender) { auth ->
