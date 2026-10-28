@@ -83,6 +83,7 @@ fun LivenessScreen(
     onPassed: (resultDigestHex: String) -> Unit,
     onCancel: () -> Unit,
     submitting: Boolean = false,
+    demoEnabled: Boolean = false,
     onRetry: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -182,17 +183,19 @@ fun LivenessScreen(
             )
         }
 
-        Spacer(Modifier.height(8.dp))
-        TextButton(
-            modifier = Modifier.heightIn(min = CaptureDimensions.primaryButtonMinHeight),
-            enabled = !submitting,
-            onClick = {
-                // Nonzero 32-byte demo digest accepted by the session API.
-                // This escape hatch deliberately works without camera permission.
-                onPassed("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
-            },
-        ) {
-            Text("Continue (demo)", style = MaterialTheme.typography.bodyMedium, color = CaptureMutedText)
+        if (demoEnabled) {
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                modifier = Modifier.heightIn(min = CaptureDimensions.primaryButtonMinHeight),
+                enabled = !submitting,
+                onClick = {
+                    // Allowed only when the backend explicitly enables demo mode.
+                    // This escape hatch deliberately works without camera permission.
+                    onPassed("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+                },
+            ) {
+                Text("Continue (demo)", style = MaterialTheme.typography.bodyMedium, color = CaptureMutedText)
+            }
         }
         busy?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = CaptureMutedText)

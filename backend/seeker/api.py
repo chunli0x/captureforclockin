@@ -12,12 +12,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import JSONResponse
 from solders.pubkey import Pubkey
-from solders.signature import Signature
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
+from .attestation import (
+    AttestationError,
+    AttestationVerifier,
+    LivenessVerification,
+    verify_wallet_proof,
+)
 from .chain import Chain, ChainUnavailable
 from .config import Settings
 from .outbox import enqueue, judgment_view, faucet_view
@@ -92,8 +97,9 @@ def insert_once(db, cls, values):
     db.execute(insert(cls).values(**values).on_conflict_do_nothing())
 
 
-def create_app(settings: Settings, *, chain=None):
+def create_app(settings: Settings, *, chain=None, attestation_verifier: AttestationVerifier | None = None):
     app = FastAPI(title="Capture judgment product", version="0.1.0")
+    attestation_verifier = attestation_verifier or AttestationVerifier()
     database = Database(settings.database_url)
     from .migrate import check_schema
     from .rate_limit import RequestLimitsMiddleware
@@ -133,6 +139,24 @@ def create_app(settings: Settings, *, chain=None):
 
     Auth = Annotated[Actor, Depends(current)]
 
+    def liveness_fresh(actor):
+        return LivenessVerification.from_actor(actor).is_fresh(
+            now=now(), demo_allowed=settings.liveness_demo,
+        )
+
+    def liveness_status(actor):
+        fresh = liveness_fresh(actor)
+        return {
+            "liveness_completed": fresh or not settings.liveness_required,
+            "liveness_fresh": fresh,
+            "liveness_required": settings.liveness_required,
+            "liveness_demo": settings.liveness_demo,
+            "liveness_verified_at": actor.liveness_verified_at,
+            "liveness_method": actor.liveness_method,
+            "liveness_expires_at": actor.liveness_expires_at,
+            "liveness_device_integrity": actor.liveness_device_integrity or "none",
+        }
+
     @app.get("/health")
     def health():
         """Real readiness probe: database connect, schema applied, chain
@@ -171,6 +195,8 @@ def create_app(settings: Settings, *, chain=None):
                 "checks": checks,
                 # Judgment product honesty (test tokens + provenance anchors).
                 "test_tokens": True,
+                "liveness_demo": settings.liveness_demo,
+                "liveness_required": settings.liveness_required,
                 "dataset_bias": "majority-preference",
                 "skr_mint": settings.skr_mint,
                 "program_id": settings.program_id,
@@ -198,13 +224,10 @@ def create_app(settings: Settings, *, chain=None):
             if c.used or c.expires <= now():
                 fail(401, "Challenge expired or already consumed")
             try:
-                valid = Signature.from_string(body.signature).verify(
-                    Pubkey.from_string(c.wallet), c.message.encode()
-                )
-            except ValueError:
-                valid = False
-            if not valid:
-                fail(401, "Signature does not match this wallet and challenge")
+                verify_wallet_proof(wallet=c.wallet, message=c.message.encode(),
+                                    signature=body.signature, expires_at=c.expires, now=now())
+            except AttestationError as exc:
+                fail(401, str(exc))
             c.used = True
             insert_once(
                 db, Actor,
@@ -232,7 +255,7 @@ def create_app(settings: Settings, *, chain=None):
         return {
             "wallet": actor.wallet,
             "over_18": actor.over_18,
-            "liveness_completed": actor.liveness_completed or not settings.liveness_required,
+            **liveness_status(actor),
             "bond_test_skr_units": settings.min_bond,
             "bonded": actor.bonded,
             "skr_funded": actor.skr_funded,
@@ -269,7 +292,15 @@ def create_app(settings: Settings, *, chain=None):
             fail(400, "result_digest must be hex")
         store = liveness_sessions()
         try:
-            digest_ = store.complete(actor.wallet, body.session_id, result_digest)
+            session = store.get(actor.wallet, body.session_id)
+            digest_ = store.complete(actor.wallet, body.session_id, result_digest,
+                                     liveness_demo=settings.liveness_demo)
+            verification = attestation_verifier.verify_liveness(
+                wallet=actor.wallet, proof_hash=digest_, result_digest=result_digest,
+                device_token=body.device_integrity_token, now=now(),
+                ttl_seconds=settings.liveness_verification_seconds,
+                demo_allowed=settings.liveness_demo,
+            )
         except UnknownSession as exc:
             fail(404, str(exc))
         except SessionExpired as exc:
@@ -280,13 +311,19 @@ def create_app(settings: Settings, *, chain=None):
             fail(400, str(exc))
         with database.transaction() as db:
             worker = lock(db, Actor, actor.wallet)
-            worker.liveness_completed = True
+            if not verification.is_fresh(now=now(), demo_allowed=settings.liveness_demo):
+                fail(410, "Liveness verification expired; request a new session")
+            worker.liveness_verified_at = verification.verified_at
+            worker.liveness_method = verification.method
+            worker.liveness_expires_at = verification.expires_at
+            worker.liveness_device_integrity = verification.device_integrity
         return {
             "liveness_proof_hash": digest_.hex(),
-            "task_id": "capture-session",
+            "task_id": session.task_id,
+            **liveness_status(worker),
             "attests": (
-                "a live person performed a motion challenge on-device; "
-                "not bank-grade anti-spoofing"
+                "demo bypass; no motion verified" if verification.method == "demo" else
+                "client reports a completed on-device motion challenge"
             ),
         }
 
@@ -417,7 +454,7 @@ def create_app(settings: Settings, *, chain=None):
     def judge_next(actor: Auth):
         with database.transaction() as db:
             actor = lock(db, Actor, actor.wallet)
-            if settings.liveness_required and not actor.liveness_completed:
+            if settings.liveness_required and not liveness_fresh(actor):
                 return {
                     "kind": "none",
                     "calibrated": True,
@@ -500,7 +537,7 @@ def create_app(settings: Settings, *, chain=None):
                 if j and (j.choice, j.rating) != (choice, rating):
                     fail(409, "You already judged this pair")
                 if j is None:
-                    if settings.liveness_required and not actor.liveness_completed:
+                    if settings.liveness_required and not liveness_fresh(actor):
                         fail(403, "Prove you're human before judging")
                     if not actor.bonded:
                         fail(403, "Deposit the SKR bond to judge")

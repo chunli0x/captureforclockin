@@ -50,6 +50,7 @@ class LivenessComplete(Strict):
     contributor: str
     session_id: str = Field(min_length=1, max_length=64)
     result_digest: str = Field(min_length=2, max_length=256)
+    device_integrity_token: str | None = Field(default=None, min_length=1, max_length=8192)
 
     @field_validator("contributor")
     @classmethod

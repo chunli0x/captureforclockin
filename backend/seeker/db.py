@@ -58,9 +58,13 @@ class Actor(Base):
     # Self-attested over-18 declaration recorded at enrollment. A claim, not a
     # cryptographic proof — never treated as one.
     over_18: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Server-side liveness gate. Set once a wallet completes a server-issued
-    # liveness session (see /liveness/complete). Proof-of-human, not bank-grade.
+    # Legacy column retained for additive migration compatibility; never used
+    # as verification evidence. Old True values require a fresh check.
     liveness_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    liveness_verified_at: Mapped[int | None] = mapped_column(BigInteger)
+    liveness_method: Mapped[str | None] = mapped_column(String(16))
+    liveness_expires_at: Mapped[int | None] = mapped_column(BigInteger)
+    liveness_device_integrity: Mapped[str | None] = mapped_column(String(64))
     # Bond gate (all server-recorded): bonded == the devnet bond was deposited;
     # skr_funded == the devnet test $SKR faucet ran.
     bonded: Mapped[bool] = mapped_column(Boolean, default=False)

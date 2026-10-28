@@ -497,6 +497,7 @@ def test_direct_submission_requires_liveness_even_with_bond(pilot):
 ])
 def test_liveness_completion_persists_and_unblocks_judging(pilot, result_digest):
     c, app, h, keys, chain, settings = pilot
+    settings.liveness_demo = result_digest == "deadbeef" * 8
     settings.liveness_required = True
     wallet = str(keys[0].pubkey())
     bond(c, h[0])
@@ -519,7 +520,12 @@ def test_liveness_completion_persists_and_unblocks_judging(pilot, result_digest)
     assert completed.status_code == 200, completed.text
     assert len(bytes.fromhex(completed.json()["liveness_proof_hash"])) == 32
     with app.state.database.transaction() as db:
-        assert db.get(Actor, wallet).liveness_completed is True
+        actor = db.get(Actor, wallet)
+        assert actor.liveness_method == ("demo" if settings.liveness_demo else "motion")
+        assert actor.liveness_verified_at < actor.liveness_expires_at
+        assert actor.liveness_expires_at - actor.liveness_verified_at == settings.liveness_verification_seconds
+        assert actor.liveness_device_integrity == "none"
+        assert actor.liveness_completed is False  # Legacy flag is no longer evidence.
     assert c.get("/me", headers=h[0]).json()["liveness_completed"] is True
     assert c.get("/me", headers=h[1]).json()["liveness_completed"] is False
     assert c.get("/judge/next", headers=h[0]).json()["pair_id"] == pid
@@ -541,7 +547,7 @@ def test_invalid_liveness_result_keeps_gate_closed_and_allows_retry(pilot, resul
     }
     assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 400
     assert c.get("/me", headers=h[0]).json()["liveness_completed"] is False
-    body["result_digest"] = "deadbeef" * 8
+    body["result_digest"] = "12" * 32
     assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 200
 
 
@@ -556,7 +562,7 @@ def test_expired_liveness_session_can_be_replaced(pilot):
     store = liveness_sessions()
     sid = session["session_id"]
     store._sessions[sid] = replace(store.get(wallet, sid), expires_at=0)
-    body = {"contributor": wallet, "session_id": sid, "result_digest": "deadbeef" * 8}
+    body = {"contributor": wallet, "session_id": sid, "result_digest": "12" * 32}
     assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 410
     assert c.get("/me", headers=h[0]).json()["liveness_completed"] is False
     replacement = c.post("/liveness/session", headers=h[0], json=request).json()
@@ -687,7 +693,7 @@ def test_migration_preserves_legacy_votes_and_reserves_before_consensus(pilot):
     with app.state.database.engine.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE judgments DROP COLUMN liability_legacy")
         conn.exec_driver_sql("DELETE FROM schema_versions WHERE version >= '0015'")
-    assert apply_migrations(app.state.database.engine) == 3
+    assert apply_migrations(app.state.database.engine) == 4
     assert apply_migrations(app.state.database.engine) == 0
     with app.state.database.transaction() as db:
         assert db.query(Judgment).one().liability_legacy

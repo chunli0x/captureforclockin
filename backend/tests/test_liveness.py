@@ -24,7 +24,7 @@ from seeker.liveness import (
 ALICE = "alice"
 BOB = "bob"
 TASK = "qualify-0007"
-RESULT = b"\xde\xad\xbe\xef" * 8
+RESULT = b"\x12" * 32  # Representative non-demo motion digest.
 
 
 @pytest.fixture
@@ -211,3 +211,19 @@ class TestSessionCompletion:
         a = store.complete(ALICE, first.session_id, RESULT)
         b = store.complete(ALICE, second.session_id, RESULT)
         assert a != b
+
+
+@pytest.mark.parametrize("demo_enabled", [False, True])
+def test_demo_digest_requires_explicit_opt_in(demo_enabled):
+    from seeker.liveness import DEMO_RESULT_DIGEST, LivenessError
+
+    store = LivenessSessionStore()
+    session = store.issue(ALICE, TASK)
+    if not demo_enabled:
+        with pytest.raises(LivenessError, match="demo liveness is disabled"):
+            store.complete(ALICE, session.session_id, DEMO_RESULT_DIGEST)
+        # Rejection does not spend the session; the motion path still works.
+        store.complete(ALICE, session.session_id, RESULT)
+    else:
+        digest = store.complete(ALICE, session.session_id, DEMO_RESULT_DIGEST, liveness_demo=True)
+        assert store.has_seen(digest)

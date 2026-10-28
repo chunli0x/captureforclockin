@@ -15,12 +15,11 @@ face never leaves the phone - that is the privacy property we want and will
 claim - but the consequence is that the server is taking the client's word for
 the *result*. A modified build can assert success without opening the camera.
 
-That gap is real and it is not closed by anything in this file. The mitigation
-is device attestation (Play Integrity on Android), which is out of scope for
-the hackathon build and belongs in the roadmap rather than in a claim. The
-demo's honest sentence is the spec's: "a live person performed a motion
-challenge", with the liveness decision made on-device and vouched for by our
-verifier - never "cryptographic proof of humanness".
+That gap is real and it is not closed by anything in this file. The pluggable
+device-integrity boundary in attestation.py defaults to "none"; Play Integrity
+is not implemented. The fixed demo digest requires explicit demo-mode opt-in.
+Other results remain client-reported motion, never cryptographic proof of
+humanness.
 
 See docs/LIVENESS.md.
 
@@ -46,6 +45,7 @@ from enum import Enum
 # program's "reject a hash I have seen" check would be reasoning about the
 # wrong thing.
 PROOF_DOMAIN = b"capture.liveness.v1"
+DEMO_RESULT_DIGEST = bytes.fromhex("deadbeef" * 8)
 
 # How long a challenge stays answerable. Long enough to read the prompt and
 # blink, short enough that a captured session is not a durable asset.
@@ -188,6 +188,7 @@ class LivenessSessionStore:
         result_digest: bytes,
         *,
         now: float | None = None,
+        liveness_demo: bool = False,
     ) -> bytes:
         """Accept one result for a session and return the proof hash."""
         now = time.time() if now is None else now
@@ -209,6 +210,9 @@ class LivenessSessionStore:
         # an on-device assertion with per-wallet rate limits, as documented.
         if len(result_digest) == 0 or result_digest == b"\x00" * len(result_digest):
             raise LivenessError("result_digest is degenerate (empty or all-zero)")
+
+        if result_digest == DEMO_RESULT_DIGEST and not liveness_demo:
+            raise LivenessError("demo liveness is disabled; complete the motion check")
 
         digest = proof_hash(
             nonce=session.nonce,

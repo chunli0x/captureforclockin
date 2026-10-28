@@ -118,6 +118,7 @@ fun SeekerApp(sender: ActivityResultSender, vm: SeekerViewModel = viewModel()) {
                     } else {
                         LivenessScreen(
                             challengeWire = challenge,
+                            demoEnabled = s.livenessDemo,
                             busy = s.error ?: s.message,
                             submitting = s.busy,
                             onRetry = if (s.error != null && !s.busy) vm::startLiveness else null,

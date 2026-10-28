@@ -8,7 +8,7 @@ Before starting `uvicorn seeker.api:production_app --factory`, use the deploymen
 ```
 
 The migrator bootstraps missing tables, applies the immutable 0011–0015 column
-migrations, and records versions 0011–0016 in `schema_versions`. Each row contains
+migrations, and records versions 0011–0018 in `schema_versions`. Each row contains
 `version`, the SHA-256 of the exact migration file, UTC `applied_at`, and
 `build_family` (`SKR` in this repository). Existing columns and balances are
 preserved. Existing accepted votes missing `liability_legacy` receive its legacy
@@ -95,3 +95,13 @@ SEEKER_LOCAL_SQLITE=true .venv/bin/python -m pytest -q
 wrong-build startup, checksums, legacy adoption, transactional rollback, parallel
 migrators, concurrent counters, restart durability, failure charging, and request
 bounds. SBF tests require the separately compiled on-chain program.
+
+## Liveness verification (0018)
+
+The PM must apply migration 0018 before starting this version. It adds nullable
+verification timestamps, method, expiry and device-integrity signal to actors.
+The old `liveness_completed` column remains for additive schema compatibility,
+but no gate reads it and old True values are not backfilled as verification.
+Existing users need a new check. No deployed database is migrated by tests.
+
+See [liveness policy and provider contract](../../docs/LIVENESS.md).
