@@ -12,6 +12,7 @@ venv/
 backend/.env
 backend/treasury.json
 backend/usdc-treasury.json
+backend/payout-signer.json
 backend/verifier.json
 backend/verifier.dev.json
 *.json.key

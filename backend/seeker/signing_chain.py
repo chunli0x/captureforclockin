@@ -12,7 +12,7 @@ from solders.keypair import Keypair
 from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.system_program import transfer, TransferParams
-from solders.transaction import Transaction
+from solders.transaction import Transaction, TransactionError
 from spl.token.constants import TOKEN_PROGRAM_ID
 from spl.token.instructions import get_associated_token_address, mint_to
 from spl.token.models import MintToParams
@@ -23,6 +23,7 @@ from .chain import (Chain, ChainUnavailable, SYSTEM, RENT, MEMO_PROGRAM,
 
 class SigningChain(Chain):
     def __init__(self, settings):
+        self.payout_signer = self._load_key(getattr(settings, "payout_signer_key_file", None))
         self.verifier = self._load_key(getattr(settings, "verifier_key_file", None))
         self.treasury = self._load_key(getattr(settings, "treasury_key_file", None))
         if self.verifier is None:
@@ -37,8 +38,18 @@ class SigningChain(Chain):
         # Derive public configuration in the worker without mutating shared settings.
         super().__init__(SimpleNamespace(**{**vars(settings), **public}))
         self.settings = settings
+        if self.payout_signer is not None:
+            configured = getattr(settings, "payout_signer", None)
+            if configured != str(self.payout_signer.pubkey()):
+                raise ChainUnavailable("Payout signer does not match configured public key")
+            if self.payout_signer.pubkey() in {self.verifier.pubkey(), self.treasury_pubkey}:
+                raise ChainUnavailable("Payout signer must be separate from other worker authorities")
 
     def check_signers(self):
+        if getattr(self.settings, "payout_mode", "mint") == "transfer":
+            if self.payout_signer is None:
+                raise ChainUnavailable("Worker payout signer key is not configured")
+            return {"verifier": "ready", "payout": "ready"}
         if self.treasury is None:
             raise ChainUnavailable("Worker treasury key is not configured")
         return {"verifier": "ready", "treasury": "ready"}
@@ -242,6 +253,12 @@ class SigningChain(Chain):
             raise ChainUnavailable("$SKR treasury (mint authority) is not configured")
         worker, payer = Pubkey.from_string(wallet), self.treasury
         payment_id = hashlib.sha256(memo.encode()).digest()[:16]
+        if prepared is not None:
+            prior = Transaction.from_bytes(base64.b64decode(prepared["transaction"], validate=True))
+            if any(bytes(ix.data[:8]) == discriminator("record_payment_v3") for ix in prior.message.instructions):
+                raise ChainUnavailable("Transfer attempt cannot be retried in mint mode")
+        if self._account_data(self.pda(b"payment-v3", payment_id)) is not None:
+            raise ChainUnavailable("Payment receipt does not match mint mode; reconcile original transfer attempt")
         receipt = self.pda(b"payment-v2", bytes(self.skr), bytes(worker), struct.pack("<Q", amount), payment_id)
         instructions = [ata_instruction(payer.pubkey(), worker, self.skr), Instruction(
             self.program,
@@ -287,6 +304,77 @@ class SigningChain(Chain):
             "encoding": "base64", "preflightCommitment": "finalized",
         }])
         self._confirm_sent(prepared["signature"])
+        return prepared["signature"]
+
+    def settle_transfer(self, wallet, amount, memo, *, persist, prepared=None, obligation_version=1):
+        """Persist before broadcast; reconcile exact finalized receipts before rebuilding.
+
+        Expiry or worker failover changes the attempt, never the receipt identity.
+        A journal from a different mode/vault/obligation fails closed even if expired.
+        """
+        self.check_environment()
+        if self.payout_signer is None:
+            raise ChainUnavailable("Worker payout signer key is not configured")
+        payer = self.payout_signer
+        old_tx = None
+        deadline = 0
+        if prepared is not None:
+            try:
+                old_tx = Transaction.from_bytes(base64.b64decode(prepared["transaction"], validate=True))
+                old_tx.verify()
+                ix = old_tx.message.instructions[-1]
+                if len(ix.data) != 80 or ix.data[:8] != discriminator("record_payment_v3"):
+                    raise ValueError("wrong instruction")
+                deadline = struct.unpack("<Q", ix.data[-8:])[0]
+                _, _, old_instructions = self.transfer_payment(
+                    wallet, amount, memo, obligation_version, deadline, old_tx.message.account_keys[0])
+                expected_message = Message.new_with_blockhash(
+                    old_instructions, old_tx.message.account_keys[0], old_tx.message.recent_blockhash)
+                if (bytes(old_tx.message) != bytes(expected_message)
+                        or str(old_tx.signatures[0]) != prepared["signature"]):
+                    raise ValueError("wrong obligation")
+            except (ValueError, TypeError, IndexError, KeyError, TransactionError) as exc:
+                raise ChainUnavailable("Journaled transfer does not match obligation") from exc
+        receipt, expected, instructions = self.transfer_payment(wallet, amount, memo, obligation_version, deadline)
+        raw = self._account_data(receipt)
+        if raw is not None:
+            if raw != expected:
+                raise ChainUnavailable("Payment receipt does not match obligation")
+            proof = SimpleNamespace(transfer_obligation=(wallet, amount, memo, obligation_version))
+            if old_tx is not None:
+                try:
+                    self.confirm(proof, prepared["signature"])
+                    return prepared["signature"]
+                except ChainUnavailable:
+                    pass
+            return self.find_signature(proof, address=receipt)
+        # Prevent mode migration from paying a previously minted obligation again.
+        payment_id = hashlib.sha256(memo.encode()).digest()[:16]
+        for old_receipt in (self.pda(b"payment", payment_id), self.pda(
+                b"payment-v2", bytes(self.skr), bytes(Pubkey.from_string(wallet)),
+                struct.pack("<Q", amount), payment_id)):
+            if self._account_data(old_receipt) is not None:
+                raise ChainUnavailable("Mint receipt exists; reconcile original mint attempt")
+        slot = self.rpc("getSlot", [{"commitment": "finalized"}])
+        expired = prepared is not None and (self.height() > prepared["last_valid_height"] or slot > deadline)
+        if prepared is None or expired:
+            deadline = slot + self.settings.payout_attempt_slots
+            _, _, instructions = self.transfer_payment(wallet, amount, memo, obligation_version, deadline)
+            result = self.rpc("getLatestBlockhash", [{"commitment": "finalized"}])["value"]
+            blockhash = Hash.from_string(result["blockhash"])
+            tx = Transaction.new_unsigned(Message.new_with_blockhash(instructions, payer.pubkey(), blockhash))
+            tx.sign([payer], blockhash)
+            prepared = {"transaction": base64.b64encode(bytes(tx)).decode(),
+                        "signature": str(tx.signatures[0]), "last_valid_height": result["lastValidBlockHeight"]}
+            persist(prepared)
+        elif old_tx.message.account_keys[0] != payer.pubkey():
+            raise ChainUnavailable("Previous payout signer attempt must expire before rotation retry")
+        self.rpc("sendTransaction", [prepared["transaction"], {
+            "encoding": "base64", "preflightCommitment": "finalized",
+        }])
+        self._confirm_sent(prepared["signature"])
+        if self._account_data(receipt) != expected:
+            raise ChainUnavailable("Finalized transfer receipt does not match obligation")
         return prepared["signature"]
 
     def post_batch(self, batch_id: str, merkle_root: str) -> str:

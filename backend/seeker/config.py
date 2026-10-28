@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +24,12 @@ class Settings(BaseSettings):
     # gitignored). Unset -> the on-chain mint is unavailable and the backend
     # fails closed instead of fabricating it.
     treasury_key_file: Path | None = None
+    # Public mode/vault/authority; the key path is read ONLY by the worker.
+    payout_mode: Literal["mint", "transfer"] = "mint"
+    payout_vault: str | None = None
+    payout_signer: str | None = None
+    payout_signer_key_file: Path | None = None
+    payout_attempt_slots: int = Field(default=300, gt=0, le=1200)
     session_seconds: int = 3600
     # Durable, shared fixed-window limits. Proxy trust is configured in uvicorn;
     # the application never accepts X-Forwarded-For directly.
@@ -74,6 +81,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def safe_environment(self):
+        if self.payout_mode == "transfer" and not (self.payout_vault and self.payout_signer):
+            raise ValueError("Transfer payouts require payout_vault and payout_signer")
         if self.cluster not in {"devnet", "localnet"}:
             raise ValueError("Only devnet/localnet are supported")
         if self.database_url.startswith("sqlite") and not self.local_sqlite:

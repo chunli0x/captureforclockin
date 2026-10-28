@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements-seeker.txt && pip check
-      - run: pytest -q tests/test_attestation.py tests/test_durability.py tests/test_judgment.py tests/test_liveness.py tests/test_outbox.py tests/test_seeker_chain.py tests/test_seeker_runtime.py tests/test_signer_separation.py
+      - run: pytest -q tests/test_attestation.py tests/test_durability.py tests/test_judgment.py tests/test_liveness.py tests/test_outbox.py tests/test_seeker_chain.py tests/test_seeker_runtime.py tests/test_signer_separation.py tests/test_transfer.py
         env:
           SEEKER_TEST_DATABASE: postgresql+psycopg://seeker_test:test_only@localhost:5432/seeker_test
   program:
@@ -35,18 +35,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p seeker-bounty --lib
       - name: Build actual SBF program
         run: |
           curl -fsSL https://github.com/anza-xyz/agave/releases/download/v4.3.0/solana-release-x86_64-unknown-linux-gnu.tar.bz2 -o /tmp/agave.tar.bz2
           tar -xjf /tmp/agave.tar.bz2 -C /tmp
           export PATH="/tmp/solana-release/bin:$PATH"
+          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
           cargo build-sbf --manifest-path programs/seeker-bounty/Cargo.toml
           test -s target/deploy/seeker_bounty.so
+      - run: cargo test -p seeker-bounty --lib
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install -r backend/requirements-seeker.txt
       - name: Execute token transfers and adversarial constraints in LiteSVM
         working-directory: backend
-        run: pytest -q tests/test_seeker_runtime.py
+        run: pytest -q tests/test_seeker_runtime.py tests/test_transfer.py

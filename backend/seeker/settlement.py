@@ -213,7 +213,11 @@ class Settlement:
         if j.payout_transaction:
             prepared = {"transaction": j.payout_transaction, "signature": j.payout_pending_signature,
                         "last_valid_height": j.payout_last_valid_height}
-        sig = self.chain.settle_skr(j.wallet, j.earned_skr, memo=j.judgment_id,
+        # Obligations currently have one immutable version. The receipt binds it;
+        # a future version cannot create a second receipt for the same judgment ID.
+        settle = (self.chain.settle_transfer if self.settings.payout_mode == "transfer"
+                  else self.chain.settle_skr)
+        sig = settle(j.wallet, j.earned_skr, memo=j.judgment_id,
                                     persist=persist, prepared=prepared)
         with self.transaction() as db:
             row = lock(db, Judgment, j.judgment_id)

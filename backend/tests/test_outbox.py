@@ -120,24 +120,29 @@ class ProcessDeath(BaseException):
     """Bypasses worker Exception handlers, like an abruptly terminated process."""
 
 
+@pytest.mark.parametrize("payout_mode", ["mint", "transfer"])
 @pytest.mark.parametrize("window", ["signed", "sent", "finalized_before_commit"])
-def test_payout_crash_windows_resume_identical_obligation(ready, monkeypatch, window):
+def test_payout_crash_windows_resume_identical_obligation(ready, monkeypatch, window, payout_mode):
     c, app, h, keys, chain, settings = ready
+    method = "settle_transfer" if payout_mode == "transfer" else "settle_skr"
+    if payout_mode == "transfer":
+        settings.payout_mode = "transfer"
+        chain.settle_transfer = chain.settle_skr
     pid, body = accept(ready)
     worker = app.state.worker
     worker.run_once()
     lease = next(j for j in worker.claim() if j.type == "settlement")
-    original = chain.settle_skr
+    original = getattr(chain, method)
     if window == "signed":
         def crash(wallet, amount, memo, *, persist, prepared=None):
             persist({"transaction": "SIGNED-TEST-TX", "signature": "durable-signature", "last_valid_height": 100})
             raise ProcessDeath()
-        chain.settle_skr = crash
+        setattr(chain, method, crash)
     elif window == "sent":
         def crash(*args, **kwargs):
             original(*args, **kwargs)
             raise ProcessDeath()
-        chain.settle_skr = crash
+        setattr(chain, method, crash)
     else:
         def before_commit(session):
             if any(isinstance(row, Judgment) and row.payout_signature for row in session.dirty):
@@ -156,7 +161,7 @@ def test_payout_crash_windows_resume_identical_obligation(ready, monkeypatch, wi
     def resume(wallet, amount, memo, *, persist, prepared=None):
         assert prepared and prepared["transaction"] == "SIGNED-TEST-TX"
         return original(wallet, amount, memo, persist=persist, prepared=prepared)
-    chain.settle_skr = resume
+    setattr(chain, method, resume)
     # Replacement worker, no HTTP retry.
     app.state.worker = Worker(app.state.database, chain, settings, batch_size=100)
     run_work(app)

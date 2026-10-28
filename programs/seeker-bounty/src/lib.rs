@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, Transfer, TransferChecked};
 
 // Development identity only. Deploy with your own keypair and update all clients.
 declare_id!("5TiDwP86k95yfQWzExrPTj5qcKxED99z8pW9fN81u5SV");
@@ -196,6 +196,104 @@ pub mod seeker_bounty {
             mint: ctx.accounts.skr_mint.key(),
             amount,
             payment_id,
+        });
+        Ok(())
+    }
+
+    /// Separate policy account preserves all existing Config bytes and instructions.
+    /// Initialization creates an EMPTY vault; funding is an external, explicit operation.
+    pub fn initialize_payout(
+        ctx: Context<InitializePayout>,
+        payout_authority: Pubkey,
+        per_transfer_cap: u64,
+        epoch_cap: u64,
+    ) -> Result<()> {
+        validate_payout_policy(
+            &ctx.accounts.config,
+            payout_authority,
+            ctx.accounts.program_data.upgrade_authority_address,
+            per_transfer_cap,
+            epoch_cap,
+        )?;
+        require!(ctx.accounts.mint.decimals == 6, Error::Invalid);
+        ctx.accounts.payout.set_inner(PayoutVault {
+            mint: ctx.accounts.mint.key(),
+            vault: ctx.accounts.vault.key(),
+            payout_authority,
+            paused: true, // Explicit admin enable after review and prefunding.
+            per_transfer_cap,
+            epoch_cap,
+            epoch: Clock::get()?.epoch,
+            spent: 0,
+        });
+        Ok(())
+    }
+
+    /// Rotation/pause/cap changes never reset the current epoch's spending.
+    pub fn configure_payout(
+        ctx: Context<ConfigurePayout>,
+        payout_authority: Pubkey,
+        paused: bool,
+        per_transfer_cap: u64,
+        epoch_cap: u64,
+    ) -> Result<()> {
+        validate_payout_policy(
+            &ctx.accounts.config,
+            payout_authority,
+            ctx.accounts.program_data.upgrade_authority_address,
+            per_transfer_cap,
+            epoch_cap,
+        )?;
+        let payout = &mut ctx.accounts.payout;
+        payout.payout_authority = payout_authority;
+        payout.paused = paused;
+        payout.per_transfer_cap = per_transfer_cap;
+        payout.epoch_cap = epoch_cap;
+        Ok(())
+    }
+
+    /// One immutable receipt per logical ID, regardless of its payment terms.
+    /// Anchor `init` rejects BOTH duplicate and conflicting retries atomically.
+    pub fn record_payment_v3(
+        ctx: Context<RecordPaymentV3>,
+        payment_id: [u8; 16],
+        recipient: Pubkey,
+        amount: u64,
+        obligation_version: u64,
+        valid_until_slot: u64,
+    ) -> Result<()> {
+        require!(
+            payment_id != [0; 16] && recipient != Pubkey::default() && obligation_version > 0,
+            Error::Invalid
+        );
+        let clock = Clock::get()?;
+        require!(clock.slot <= valid_until_slot, Error::PaymentExpired);
+        let spent = ctx.accounts.payout.next_spent(amount, clock.epoch)?;
+        let config = ctx.accounts.config.key();
+        let seeds: &[&[u8]] = &[b"payout", config.as_ref(), &[ctx.bumps.payout]];
+        token::transfer_checked(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.key(),
+                TransferChecked {
+                    from: ctx.accounts.vault.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.destination.to_account_info(),
+                    authority: ctx.accounts.payout.to_account_info(),
+                },
+                &[seeds],
+            ),
+            amount,
+            6,
+        )?;
+        ctx.accounts.payout.epoch = clock.epoch;
+        ctx.accounts.payout.spent = spent;
+        ctx.accounts.payment.set_inner(PaymentV3 {
+            recipient,
+            mint: ctx.accounts.mint.key(),
+            amount,
+            payment_id,
+            funding_vault: ctx.accounts.vault.key(),
+            obligation_version,
         });
         Ok(())
     }
@@ -532,6 +630,126 @@ pub struct ResolveJudgment<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Legacy SPL Token only: no transfer fees, hooks or alternate token programs.
+#[account]
+#[derive(InitSpace)]
+pub struct PayoutVault {
+    pub mint: Pubkey,
+    pub vault: Pubkey,
+    pub payout_authority: Pubkey,
+    pub paused: bool,
+    pub per_transfer_cap: u64,
+    pub epoch_cap: u64,
+    pub epoch: u64,
+    pub spent: u64,
+}
+
+impl PayoutVault {
+    fn next_spent(&self, amount: u64, epoch: u64) -> Result<u64> {
+        require!(!self.paused, Error::PayoutPaused);
+        require!(
+            amount > 0 && amount <= self.per_transfer_cap,
+            Error::PayoutCap
+        );
+        require!(epoch >= self.epoch, Error::Invalid);
+        let previous = if epoch == self.epoch { self.spent } else { 0 };
+        let spent = previous.checked_add(amount).ok_or(Error::Overflow)?;
+        require!(spent <= self.epoch_cap, Error::PayoutCap);
+        Ok(spent)
+    }
+}
+
+fn validate_payout_policy(
+    config: &Config,
+    authority: Pubkey,
+    upgrade_authority: Option<Pubkey>,
+    per_transfer_cap: u64,
+    epoch_cap: u64,
+) -> Result<()> {
+    require!(
+        authority != Pubkey::default()
+            && authority != config.admin
+            && authority != config.slash_authority
+            && authority != config.verifier
+            && Some(authority) != upgrade_authority,
+        Error::Unauthorized
+    );
+    require!(
+        per_transfer_cap > 0 && epoch_cap >= per_transfer_cap,
+        Error::Invalid
+    );
+    Ok(())
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct PaymentV3 {
+    pub recipient: Pubkey,
+    pub mint: Pubkey,
+    pub amount: u64,
+    pub payment_id: [u8; 16],
+    pub funding_vault: Pubkey,
+    pub obligation_version: u64,
+}
+
+#[derive(Accounts)]
+pub struct InitializePayout<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(seeds=[b"config"], bump, has_one=admin,
+        constraint=config.skr_mint == mint.key() @ Error::Unauthorized)]
+    pub config: Account<'info, Config>,
+    pub mint: Account<'info, Mint>,
+    #[account(init, payer=admin, space=8+PayoutVault::INIT_SPACE,
+        seeds=[b"payout", config.key().as_ref()], bump)]
+    pub payout: Account<'info, PayoutVault>,
+    #[account(init, payer=admin, seeds=[b"payout-vault", payout.key().as_ref()], bump,
+        token::mint=mint, token::authority=payout)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(constraint=program.programdata_address()? == Some(program_data.key()) @ Error::Unauthorized)]
+    pub program: Program<'info, crate::program::SeekerBounty>,
+    pub program_data: Account<'info, ProgramData>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct ConfigurePayout<'info> {
+    pub admin: Signer<'info>,
+    #[account(seeds=[b"config"], bump, has_one=admin)]
+    pub config: Account<'info, Config>,
+    #[account(mut, seeds=[b"payout", config.key().as_ref()], bump)]
+    pub payout: Account<'info, PayoutVault>,
+    #[account(constraint=program.programdata_address()? == Some(program_data.key()) @ Error::Unauthorized)]
+    pub program: Program<'info, crate::program::SeekerBounty>,
+    pub program_data: Account<'info, ProgramData>,
+}
+
+#[derive(Accounts)]
+#[instruction(payment_id: [u8; 16], recipient: Pubkey)]
+pub struct RecordPaymentV3<'info> {
+    #[account(mut)]
+    pub payout_authority: Signer<'info>,
+    #[account(seeds=[b"config"], bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut, seeds=[b"payout", config.key().as_ref()], bump,
+        has_one=payout_authority, has_one=mint, has_one=vault)]
+    pub payout: Account<'info, PayoutVault>,
+    #[account(constraint=mint.decimals == 6 @ Error::Invalid)]
+    pub mint: Account<'info, Mint>,
+    #[account(mut, seeds=[b"payout-vault", payout.key().as_ref()], bump,
+        token::mint=mint, token::authority=payout)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(init, payer=payout_authority, space=8+PaymentV3::INIT_SPACE,
+        seeds=[b"payment-v3", payment_id.as_ref()], bump)]
+    pub payment: Account<'info, PaymentV3>,
+    #[account(mut, token::mint=mint, token::authority=recipient,
+        constraint=destination.key() != vault.key() @ Error::Invalid)]
+    pub destination: Account<'info, TokenAccount>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
 #[event]
 pub struct BondWarned {
     pub worker: Pubkey,
@@ -566,6 +784,12 @@ pub enum Error {
     Slashed,
     #[msg("Two warnings are required before a bond can be slashed")]
     NotWarned,
+    #[msg("Payout vault is paused")]
+    PayoutPaused,
+    #[msg("Payout spending cap exceeded")]
+    PayoutCap,
+    #[msg("Payment attempt expired")]
+    PaymentExpired,
 }
 
 #[cfg(test)]
@@ -640,3 +864,6 @@ mod tests {
         assert!(valid_merkle_root([1u8; 32]));
     }
 }
+
+#[cfg(test)]
+mod transfer_tests;

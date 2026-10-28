@@ -152,6 +152,9 @@ class Chain:
                 "Configured verifier, mints or bond differ from program"
             )
 
+        if getattr(self.settings, "payout_mode", "mint") == "transfer":
+            self.check_payout_environment()
+
     def build(self, action, wallet, amount=None):
         """Build the instructions for a bond or slash action. ``amount`` is
         unused for warn/slash (kept for the ``issue`` call signature)."""
@@ -275,6 +278,43 @@ class Chain:
         except (ValueError, KeyError, TypeError) as exc:
             raise ChainUnavailable("Invalid receipt data") from exc
 
+    def transfer_payment(self, wallet, amount, memo, obligation_version, valid_until_slot, signer=None):
+        """Public instruction/receipt builder; no key access and no network writes."""
+        worker = Pubkey.from_string(wallet)
+        authority = signer or Pubkey.from_string(self.settings.payout_signer)
+        vault = Pubkey.from_string(self.settings.payout_vault)
+        policy = self.pda(b"payout", bytes(self.config))
+        if vault != self.pda(b"payout-vault", bytes(policy)):
+            raise ChainUnavailable("Configured payout vault is not the program vault")
+        if not (0 < amount < 2**64 and 0 < obligation_version < 2**64):
+            raise ChainUnavailable("Invalid transfer obligation")
+        payment_id = hashlib.sha256(memo.encode()).digest()[:16]
+        receipt = self.pda(b"payment-v3", payment_id)
+        expected = (discriminator("PaymentV3", "account") + bytes(worker) + bytes(self.skr)
+                    + struct.pack("<Q", amount) + payment_id + bytes(vault)
+                    + struct.pack("<Q", obligation_version))
+        instructions = [ata_instruction(authority, worker, self.skr), Instruction(
+            self.program, discriminator("record_payment_v3") + payment_id + bytes(worker)
+            + struct.pack("<QQQ", amount, obligation_version, valid_until_slot),
+            [meta(authority, True, True), meta(self.config), meta(policy, writable=True),
+             meta(self.skr), meta(vault, writable=True), meta(receipt, writable=True),
+             meta(get_associated_token_address(worker, self.skr), writable=True),
+             meta(SYSTEM), meta(TOKEN_PROGRAM_ID)],
+        )]
+        return receipt, expected, instructions
+
+    def check_payout_environment(self):
+        """Read-only startup check for the independently configured payout authority."""
+        policy = self.pda(b"payout", bytes(self.config))
+        vault = Pubkey.from_string(self.settings.payout_vault)
+        if vault != self.pda(b"payout-vault", bytes(policy)):
+            raise ChainUnavailable("Configured payout vault is not the program vault")
+        raw = self._account_data(policy)
+        expected = (discriminator("PayoutVault", "account") + bytes(self.skr)
+                    + bytes(vault) + bytes(Pubkey.from_string(self.settings.payout_signer)))
+        if raw is None or len(raw) != 137 or raw[:104] != expected:
+            raise ChainUnavailable("Payout policy does not match configured mint, vault or signer")
+
     def height(self):
         return self.rpc("getBlockHeight", [{"commitment": "finalized"}])
 
@@ -307,9 +347,24 @@ class Chain:
             tx.verify()
         except (ValueError, TypeError, TransactionError) as exc:
             raise ChainUnavailable("Invalid transaction confirmation") from exc
+        if hasattr(prepared, "transfer_obligation"):
+            # A receipt can outlive an attempt and a signer rotation. Match the
+            # complete transfer operation while allowing its attempt deadline
+            # and historically authorized payer to differ.
+            if not tx.message.instructions:
+                raise ChainUnavailable("Transaction is not a v3 transfer")
+            ix = tx.message.instructions[-1]
+            if len(ix.data) != 80 or ix.data[:8] != discriminator("record_payment_v3"):
+                raise ChainUnavailable("Transaction is not a v3 transfer")
+            deadline = struct.unpack("<Q", ix.data[-8:])[0]
+            payer = tx.message.account_keys[0]
+            _, _, instructions = self.transfer_payment(*prepared.transfer_obligation, deadline, payer)
+            expected_hash = message_fingerprint(Message.new_with_blockhash(instructions, payer, Hash.default()))
+        else:
+            expected_hash = prepared.message_hash
         if (
             str(tx.signatures[0]) != signature
-            or message_fingerprint(tx.message) != prepared.message_hash
+            or message_fingerprint(tx.message) != expected_hash
         ):
             raise ChainUnavailable("Transaction does not match this prepared operation")
         return True
