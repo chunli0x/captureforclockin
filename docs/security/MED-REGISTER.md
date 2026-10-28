@@ -23,13 +23,13 @@ Reconciled against current `main` on 2026-10-27. Status is verified against the 
 | M2 | Bond-confirmation lock-order deadlock | **Fixed** | `record_confirmation` releases locks between phases + locks Actor→Prepared consistently (`api.py:688`) |
 | M3 | Judgment obligations lack automatic recovery | **Fixed** | Postgres outbox + fenced worker + reconciler (`c8e5857`) |
 | M4 | Batch-anchor retry can't recover landed tx | **Fixed** | Reconciler reads existing account/root before re-init (`c8e5857`) |
-| M5 | Fresh deposits retain stale warning state | **Open** | `record_confirmation` sets `bonded=True` but does not reconcile `warnings`; settlement reconciles on resolve only |
+| M5 | Fresh deposits retain stale warning state | **Fixed** | Deposit confirm mirrors authoritative on-chain warnings (`942e851`) |
 | M6 | Anti-spoof crop coordinate mismatch | **Fixed** | Rotation fix (`e8b8845`) |
-| M7 | Withdrawal/recovery UI unreachable | **Open** | `SeekerViewModel.recover()` exists but no UI caller in `BalanceScreen`; `s.error` still not rendered |
-| M8 | Broken image traps judging UI | **Open** | "try another" re-fetches the same failed pair; no skip/exclude/unavailable-media op |
+| M7 | Withdrawal/recovery UI unreachable | **Fixed** | Withdrawal/recovery control + `OperationFeedback` error/retry (`942e851`) |
+| M8 | Broken image traps judging UI | **Fixed** | Unpaid media skip/exclude path (`942e851`) |
 | M9 | CI distributes emulator-only debug build | **Fixed** | Release build + HTTPS URL (`d364a95`) |
 | M10 | Program ID inconsistent across bootstrap | **Fixed** | `22eca2e` + program-ID patch |
-| M11 | PostgreSQL CI references deleted tests | **Open** | `seeker.yml:29` still lists `test_seeker_flow.py`, `test_seeker_audit_concurrency.py`, `test_seeker_slash.py`, `test_bond_gate.py` |
+| M11 | PostgreSQL CI references deleted tests | **Fixed** | `seeker.yml` repointed at real tests (`942e851`) |
 | M12 | Rolling abstention cap actually lifetime | **Fixed** | `judge_flat_cap` + `_flat_payments_recent` window in `settlement.py:181` |
 
 ## Verified safeguards (at audit time — re-confirm)
@@ -43,10 +43,4 @@ Reconciled against current `main` on 2026-10-27. Status is verified against the 
 
 ## Result
 
-**8 of 12 MED fixed; 4 remain open** (M5, M7, M8, M11 — all minor correctness/UX/CI items).
-
-Remaining backlog in priority order:
-1. **M11** — fix `seeker.yml` test paths (trivial, CI hygiene).
-2. **M8** — add a skip/exclude for broken media (image UX).
-3. **M7** — wire withdrawal/recovery UI + render `s.error`.
-4. **M5** — reconcile bond/warning state on deposit confirm.
+**12 of 12 MED fixed.** All four remaining backlog items (M5, M7, M8, M11) were resolved in `942e851` (SKR) / `bf8b8b2` (USDC): authoritative warning reconciliation on deposit confirm, withdrawal/recovery controls with visible error+retry feedback, an unpaid media-skip path, and repaired CI test coverage. The HIGHs remain dispositioned as noted above.
