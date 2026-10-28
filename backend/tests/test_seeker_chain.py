@@ -336,3 +336,59 @@ def test_expired_payment_transaction_rebuilt_and_journaled_before_send(chain, pa
     assert len(journal) == 2 and len(sends) == 2 and sends[0] != sends[1]
     txs = [Transaction.from_bytes(base64.b64decode(raw)) for raw in sends]
     assert message_fingerprint(txs[0].message) == message_fingerprint(txs[1].message)
+
+
+@pytest.mark.parametrize("window", ["signed", "sent"])
+def test_crashed_payout_reuses_exact_signed_bytes(chain, payer, window):
+    chain.treasury = payer
+    journal, sends = [], []
+    crash = True
+
+    class Death(BaseException):
+        pass
+
+    def persist(prepared):
+        journal.append(prepared)
+        if crash and window == "signed":
+            raise Death()
+
+    def rpc(method, params):
+        if method == "getAccountInfo":
+            return {"value": None}
+        if method == "getLatestBlockhash":
+            return {"value": {"blockhash": str(Hash.new_unique()), "lastValidBlockHeight": 100}}
+        if method == "getBlockHeight":
+            return 10
+        if method == "sendTransaction":
+            assert journal[-1]["transaction"] == params[0]
+            sends.append(params[0])
+            if crash and window == "sent":
+                raise Death()
+            return journal[-1]["signature"]
+        if method == "getSignatureStatuses":
+            return {"value": [{"err": None, "confirmationStatus": "finalized"}]}
+        raise AssertionError(method)
+
+    chain.rpc = rpc
+    with pytest.raises(Death):
+        chain.settle_skr(str(payer.pubkey()), 100, "crash-window", persist=persist)
+    crash = False
+    signature = chain.settle_skr(str(payer.pubkey()), 100, "crash-window", persist=persist, prepared=journal[0])
+    assert len(journal) == 1 and signature == journal[0]["signature"]
+    assert len(sends) == (2 if window == "sent" else 1)
+    assert all(raw == journal[0]["transaction"] for raw in sends)
+
+
+def test_anchor_recovers_exact_finalized_receipt_and_rejects_mismatch(chain):
+    from unittest.mock import Mock
+    root, batch = "ab" * 32, "cd" * 16
+    raw = discriminator("Batch", "account") + bytes.fromhex(root)
+    chain.rpc = Mock(return_value={"value": {"owner": str(chain.program),
+                     "data": [base64.b64encode(raw).decode(), "base64"]}})
+    chain.post_batch(batch, root)
+    assert [c.args[0] for c in chain.rpc.call_args_list] == ["getAccountInfo"]
+    with pytest.raises(ChainUnavailable, match="immutable root"):
+        chain.post_batch(batch, "ef" * 32)
+    chain.rpc.return_value["value"]["owner"] = str(Keypair().pubkey())
+    with pytest.raises(ChainUnavailable, match="wrong owner"):
+        chain.post_batch(batch, root)

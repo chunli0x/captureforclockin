@@ -484,11 +484,16 @@ class Chain:
         ``batch_id`` is 32 hex chars (16 bytes); ``merkle_root`` is 64 hex
         chars (32 bytes). Server-signed by the verifier (slash_authority), which
         is the anchor authority. The ``init`` batch account makes it append-only:
-        re-anchoring the same batch_id fails preflight (RPC error -> closed).
+        retries verify the exact finalized account before attempting a write.
         """
         batch_bytes = bytes.fromhex(batch_id)
         root_bytes = bytes.fromhex(merkle_root)
         batch_pda = self.pda(b"batch", batch_bytes)
+        raw = self._account_data(batch_pda)
+        if raw is not None:
+            if raw != discriminator("Batch", "account") + root_bytes:
+                raise ChainUnavailable("Batch receipt does not match immutable root")
+            return str(batch_pda)  # Exact finalized receipt proves the anchor.
         instructions = [
             Instruction(
                 self.program,

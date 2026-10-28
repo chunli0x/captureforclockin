@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from seeker.api import create_app
 from seeker.config import Settings
-from seeker.db import Actor, CalibrationPair, Judgment, JudgmentBatch, JudgmentPair
+from seeker.db import Job, Actor, CalibrationPair, Judgment, JudgmentBatch, JudgmentPair
 from seeker.chain import ChainUnavailable
 from seeker.judge_leveling import level_for, rate_multiplier
 from seeker import judgment as judgment_mod
@@ -103,6 +103,8 @@ def pilot(tmp_path):
     apply_migrations(engine)
     engine.dispose()
     app = create_app(settings, chain=chain)
+    from seeker.worker import Worker
+    app.state.worker = Worker(app.state.database, chain, settings, batch_size=100)
     c = TestClient(app)
     keys = [Keypair() for _ in range(4)]
     h = []
@@ -119,6 +121,36 @@ def pilot(tmp_path):
         h.append({"Authorization": "Bearer " + v.json()["token"]})
     yield c, app, h, keys, chain, settings
     app.state.database.engine.dispose()
+
+
+def run_work(app):
+    """Drive a separate worker after HTTP returns; skip wall-clock backoff in tests.
+
+    Failures get one attempt per call. Dependency waits can advance within the
+    call so reservation -> settlement -> anchor is deterministic.
+    """
+    from sqlalchemy import update
+    with app.state.database.transaction() as db:
+        db.execute(update(Job).where(Job.status == "pending").values(next_attempt_at=0))
+    app.state.worker.reconcile()
+    for _ in range(4):
+        with app.state.database.transaction() as db:
+            db.execute(update(Job).where(Job.status == "pending", Job.last_error.is_(None)).values(next_attempt_at=0))
+        for job in sorted(app.state.worker.claim(), key=lambda j: j.type != "reservation"):
+            app.state.worker.execute(job)
+
+
+def submit(c, app, path, **kwargs):
+    response = c.post(path, **kwargs)
+    if response.status_code == 202:
+        run_work(app)
+    return response
+
+
+def progress(app, response):
+    from seeker.outbox import judgment_view
+    with app.state.database.transaction() as db:
+        return judgment_view(db, db.get(Judgment, response.json()["judgment_id"]))
 
 
 def seed_calibration(app, n, known="a"):
@@ -248,12 +280,12 @@ def test_consensus_majority_pays_aligned(pilot):
     for hd in h[:3]:
         ready_judge(c, app, hd, ids)
     pid = seed_pair(app)
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).json()["status"] == "submitted"
-    assert c.post(f"/judge/{pid}", headers=h[1], json={"choice": "a"}).json()["status"] == "submitted"
-    r = c.post(f"/judge/{pid}", headers=h[2], json={"choice": "b"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["status"] == "resolved"
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"}).json()["status"] == "accepted"
+    assert submit(c, app, f"/judge/{pid}", headers=h[1], json={"choice": "a"}).json()["status"] == "accepted"
+    r = submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "b"})
+    assert r.status_code == 202, r.text
+    body = progress(app, r)
+    assert body["pair_status"] == "resolved"
     assert body["preference"] == "a"
     assert abs(body["agreement"] - 2 / 3) < 1e-6
 
@@ -269,11 +301,11 @@ def test_cant_tell_reroutes_and_pays_flat(pilot):
     for hd in h[:3]:
         ready_judge(c, app, hd, ids)
     pid = seed_pair(app)
-    c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
-    c.post(f"/judge/{pid}", headers=h[1], json={"choice": "b"})
-    r = c.post(f"/judge/{pid}", headers=h[2], json={"choice": "cant_tell"})
-    assert r.status_code == 200, r.text
-    assert r.json()["status"] == "rerouted"
+    submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"})
+    submit(c, app, f"/judge/{pid}", headers=h[1], json={"choice": "b"})
+    r = submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "cant_tell"})
+    assert r.status_code == 202, r.text
+    assert progress(app, r)["pair_status"] == "collecting"
     # The "can't tell" judge earned the flat rate; nobody was resolved as aligned.
     w2 = str(keys[2].pubkey())
     assert (w2, settings.judge_flat_skr) in chain.settled_skr
@@ -285,10 +317,10 @@ def test_tie_reroutes(pilot):
     for hd in h[:3]:
         ready_judge(c, app, hd, ids)
     pid = seed_pair(app)
-    c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
-    c.post(f"/judge/{pid}", headers=h[1], json={"choice": "b"})
-    r = c.post(f"/judge/{pid}", headers=h[2], json={"choice": "tie"})
-    assert r.json()["status"] == "rerouted"
+    submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"})
+    submit(c, app, f"/judge/{pid}", headers=h[1], json={"choice": "b"})
+    r = submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "tie"})
+    assert progress(app, r)["pair_status"] == "collecting"
 
 
 def test_rating_median_alignment(pilot):
@@ -297,10 +329,10 @@ def test_rating_median_alignment(pilot):
     for hd in h[:3]:
         ready_judge(c, app, hd, ids)
     pid = seed_pair(app, task_type="rating")
-    c.post(f"/judge/{pid}", headers=h[0], json={"rating": 4})
-    c.post(f"/judge/{pid}", headers=h[1], json={"rating": 4})
-    r = c.post(f"/judge/{pid}", headers=h[2], json={"rating": 2})
-    assert r.json()["status"] == "resolved"
+    submit(c, app, f"/judge/{pid}", headers=h[0], json={"rating": 4})
+    submit(c, app, f"/judge/{pid}", headers=h[1], json={"rating": 4})
+    r = submit(c, app, f"/judge/{pid}", headers=h[2], json={"rating": 2})
+    assert progress(app, r)["pair_status"] == "resolved"
     w0, w1, w2 = [str(k.pubkey()) for k in keys[:3]]
     assert sorted(chain.settled_skr) == sorted([(w0, settings.judge_base_skr), (w1, settings.judge_base_skr)])
 
@@ -340,9 +372,9 @@ def test_dissenter_below_floor_is_warned(pilot):
         db.get(Actor, w2).judged_count = 30
         db.get(Actor, w2).agreement_rate = 0.0
     pid = seed_pair(app)
-    c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
-    c.post(f"/judge/{pid}", headers=h[1], json={"choice": "a"})
-    c.post(f"/judge/{pid}", headers=h[2], json={"choice": "b"})
+    submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"})
+    submit(c, app, f"/judge/{pid}", headers=h[1], json={"choice": "a"})
+    submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "b"})
     # Judge 2 dissented with a rate now below the floor -> warn issued.
     assert ("warn", w2, None) in chain.issued
     with app.state.database.transaction() as db:
@@ -381,10 +413,10 @@ def test_tie_vote_is_neutral_not_dissent(pilot):
     for hd in h[:3]:
         ready_judge(c, app, hd, ids)
     pid = seed_pair(app)
-    c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
-    c.post(f"/judge/{pid}", headers=h[1], json={"choice": "a"})
-    r = c.post(f"/judge/{pid}", headers=h[2], json={"choice": "tie"})
-    assert r.json()["status"] == "rerouted"
+    submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"})
+    submit(c, app, f"/judge/{pid}", headers=h[1], json={"choice": "a"})
+    r = submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "tie"})
+    assert progress(app, r)["pair_status"] == "collecting"
     # The tie judge did not dissent: their agreement rate is still neutral
     # (default 0.0, not lowered), and their judged_count did not advance.
     w2 = str(keys[2].pubkey())
@@ -427,11 +459,11 @@ def test_payout_obligation_persisted_before_broadcast(pilot):
         return str(Keypair().sign_message(b"ok"))
 
     chain.settle_skr = flaky_settle
-    c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
-    c.post(f"/judge/{pid}", headers=h[1], json={"choice": "a"})
-    r = c.post(f"/judge/{pid}", headers=h[2], json={"choice": "b"})
-    # First obligation fails -> 503, pair left resolving, obligation journaled.
-    assert r.status_code == 503
+    submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"})
+    submit(c, app, f"/judge/{pid}", headers=h[1], json={"choice": "a"})
+    r = submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "b"})
+    # HTTP accepts durably; failed worker payout leaves the obligation journaled.
+    assert r.status_code == 202
     with app.state.database.transaction() as db:
         p = db.get(JudgmentPair, pid)
         assert p.status == "resolving"
@@ -447,14 +479,14 @@ def test_direct_submission_requires_liveness_even_with_bond(pilot):
     c, app, h, keys, chain, settings = pilot
     bond(c, h[0])
     pid = seed_pair(app, k=1)
-    response = c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"})
+    response = submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"})
     assert response.status_code == 403
     assert "human" in response.json()["detail"]
     with app.state.database.transaction() as db:
         assert db.query(Judgment).count() == 0
     assert not chain.reservations and not chain.settled_skr
     settings.liveness_required = False
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 200
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 202
 
 
 @pytest.mark.parametrize("result_digest", [
@@ -469,7 +501,7 @@ def test_liveness_completion_persists_and_unblocks_judging(pilot, result_digest)
     pid = seed_pair(app)
     assert c.get("/me", headers=h[0]).json()["liveness_completed"] is False
     assert c.get("/judge/next", headers=h[0]).json()["kind"] == "none"
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 403
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 403
 
     issued = c.post("/liveness/session", headers=h[0], json={
         "contributor": wallet, "task_id": "capture-session",
@@ -489,7 +521,7 @@ def test_liveness_completion_persists_and_unblocks_judging(pilot, result_digest)
     assert c.get("/me", headers=h[0]).json()["liveness_completed"] is True
     assert c.get("/me", headers=h[1]).json()["liveness_completed"] is False
     assert c.get("/judge/next", headers=h[0]).json()["pair_id"] == pid
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 200
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 202
     assert c.post("/liveness/complete", headers=h[0], json=body).status_code == 409
 
 
@@ -548,14 +580,15 @@ def test_retry_after_mint_confirmation_loss_does_not_deadlock_or_double_pay(pilo
         raise ChainUnavailable("confirmation lost after successful mint")
 
     chain.settle_skr = lost_confirmation
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 503
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 202
     assert len(chain.settled_skr) == 1
     chain.settle_skr = original
     # SQLite BEGIN IMMEDIATE would self-deadlock here with the old retry path.
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = [pool.submit(c.post, f"/judge/{pid}", headers=h[0], json={"choice": "a"}) for _ in range(2)]
-        assert all(f.result(timeout=5).status_code == 200 for f in results)
+        assert all(f.result(timeout=5).status_code == 202 for f in results)
+    run_work(app)
     assert len(chain.settled_skr) == 1
     with app.state.database.transaction() as db:
         assert db.get(JudgmentPair, pid).status == "resolved"
@@ -582,8 +615,8 @@ def test_enforcement_failure_is_durable_and_concurrent_retries_warn_once(pilot):
 
     chain.resolve_judgment = lose_confirmation
     for i, choice in enumerate(("a", "a", "b")):
-        r = c.post(f"/judge/{pid}", headers=h[i], json={"choice": choice})
-    assert r.status_code == 503
+        r = submit(c, app, f"/judge/{pid}", headers=h[i], json={"choice": choice})
+    assert r.status_code == 202
     with app.state.database.transaction() as db:
         assert db.get(JudgmentPair, pid).status == "enforcing"
         penalty = db.query(Judgment).filter_by(enforcement_penalty=True).one()
@@ -592,7 +625,8 @@ def test_enforcement_failure_is_durable_and_concurrent_retries_warn_once(pilot):
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as pool:
         replies = [pool.submit(c.post, f"/judge/{pid}", headers=h[2], json={"choice": "b"}) for _ in range(2)]
-        assert all(f.result(timeout=5).status_code == 200 for f in replies)
+        assert all(f.result(timeout=5).status_code == 202 for f in replies)
+    run_work(app)
     wallet = str(keys[2].pubkey())
     assert chain.issued.count(("warn", wallet, None)) == 1
     with app.state.database.transaction() as db:
@@ -613,14 +647,14 @@ def test_reservation_unknown_result_retries_same_durable_id(pilot):
         raise ChainUnavailable("reserve landed but response lost")
 
     chain.reserve_judgment = lost_confirmation
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 503
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 202
     with app.state.database.transaction() as db:
         row = db.query(Judgment).one()
         rid = row.judgment_id
         assert not row.liability_reserved
         assert db.get(JudgmentPair, pid).status == "open"
     chain.reserve_judgment = original
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 200
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "a"}).status_code == 202
     assert chain.reservations == {(str(keys[0].pubkey()), rid)}
 
 
@@ -631,9 +665,9 @@ def test_neutral_payout_and_release_retry(pilot):
     pid = seed_pair(app)
     original = chain.resolve_judgment
     chain.resolve_judgment = lambda *args: (_ for _ in ()).throw(ChainUnavailable("offline"))
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "cant_tell"}).status_code == 503
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "cant_tell"}).status_code == 202
     chain.resolve_judgment = original
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "cant_tell"}).status_code == 200
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "cant_tell"}).status_code == 202
     assert len(chain.settled_skr) == 1 and not chain.reservations
 
 
@@ -651,13 +685,13 @@ def test_migration_preserves_legacy_votes_and_reserves_before_consensus(pilot):
     with app.state.database.engine.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE judgments DROP COLUMN liability_legacy")
         conn.exec_driver_sql("DELETE FROM schema_versions WHERE version >= '0015'")
-    assert apply_migrations(app.state.database.engine) == 2
+    assert apply_migrations(app.state.database.engine) == 3
     assert apply_migrations(app.state.database.engine) == 0
     with app.state.database.transaction() as db:
         assert db.query(Judgment).one().liability_legacy
-    response = c.post(f"/judge/{pid}", headers=h[1], json={"choice": "a"})
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "resolved"
+    response = submit(c, app, f"/judge/{pid}", headers=h[1], json={"choice": "a"})
+    assert response.status_code == 202, response.text
+    assert progress(app, response)["pair_status"] == "resolved"
     assert len(chain.settled_skr) == 2
     with app.state.database.transaction() as db:
         assert all(j.liability_reserved and not j.liability_legacy for j in db.query(Judgment).all())
@@ -674,14 +708,14 @@ def test_abandoned_unconfirmed_submission_is_cancelled_at_resolution(pilot):
 
     def lost_confirmation(wallet, rid):
         original(wallet, rid)
-        raise ChainUnavailable("reservation may have landed")
+        if wallet == str(keys[0].pubkey()):
+            raise ChainUnavailable("reservation may have landed")
 
     chain.reserve_judgment = lost_confirmation
-    assert c.post(f"/judge/{pid}", headers=h[0], json={"choice": "b"}).status_code == 503
-    chain.reserve_judgment = original
+    assert submit(c, app, f"/judge/{pid}", headers=h[0], json={"choice": "b"}).status_code == 202
     for hd in h[1:3]:
-        response = c.post(f"/judge/{pid}", headers=hd, json={"choice": "a"})
-    assert response.json()["status"] == "resolved"
+        response = submit(c, app, f"/judge/{pid}", headers=hd, json={"choice": "a"})
+    assert progress(app, response)["pair_status"] == "resolved"
     assert not chain.reservations
     with app.state.database.transaction() as db:
         j = db.query(Judgment).filter_by(wallet=str(keys[0].pubkey())).one()
@@ -698,13 +732,13 @@ def test_second_resolution_slashes_once_and_slashed_judge_can_reconcile(pilot):
     for _ in range(2):
         pid = seed_pair(app)
         for i, choice in enumerate(("a", "a", "b")):
-            response = c.post(f"/judge/{pid}", headers=h[i], json={"choice": choice})
-        assert response.status_code == 200, response.text
+            response = submit(c, app, f"/judge/{pid}", headers=h[i], json={"choice": choice})
+        assert response.status_code == 202, response.text
     wallet = str(keys[2].pubkey())
     with app.state.database.transaction() as db:
         actor = db.get(Actor, wallet)
         assert actor.warnings == 2 and not actor.bonded and actor.staked_skr == 0
         assert actor.judged_count == 2
-    assert c.post(f"/judge/{pid}", headers=h[2], json={"choice": "b"}).status_code == 200
+    assert submit(c, app, f"/judge/{pid}", headers=h[2], json={"choice": "b"}).status_code == 202
     assert chain.issued.count(("warn", wallet, None)) == 2
     assert chain.issued.count(("slash", wallet, None)) == 1

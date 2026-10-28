@@ -63,10 +63,10 @@ def test_migrator_cli_records_checksums_and_second_run_is_noop(settings, databas
                SEEKER_PROGRAM_ID=settings.program_id, SEEKER_SKR_MINT=settings.skr_mint,
                SEEKER_VERIFIER_KEY_FILE=str(settings.verifier_key_file))
     first = subprocess.run([sys.executable, "-m", "seeker.migrate"], env=env, capture_output=True, text=True, check=True)
-    assert "6 migration version(s) recorded" in first.stdout
+    assert "7 migration version(s) recorded" in first.stdout
     with database.engine.connect() as conn:
         before = conn.execute(select(SchemaVersion.__table__)).all()
-    assert [r.version for r in before] == ["0011", "0012", "0013", "0014", "0015", "0016"]
+    assert [r.version for r in before] == ["0011", "0012", "0013", "0014", "0015", "0016", "0017"]
     for row, (version, checksum, _) in zip(before, migrate._numbered_migrations()):
         assert row.version == version and row.checksum == checksum
         assert row.build_family == migrate.BUILD_FAMILY and row.applied_at
@@ -90,7 +90,7 @@ def test_preledger_schema_is_baselined_and_balances_preserved(database):
         conn.exec_driver_sql("DROP TABLE schema_versions")
         conn.exec_driver_sql("ALTER TABLE seeker_actors DROP COLUMN faucet_count")
         conn.exec_driver_sql("ALTER TABLE judgments DROP COLUMN settling")
-    assert migrate.apply_migrations(database.engine) == 6
+    assert migrate.apply_migrations(database.engine) == 7
     migrate.check_schema(database.engine)
     with database.transaction() as db:
         actor = db.get(Actor, "legacy-wallet")
@@ -147,7 +147,7 @@ def test_failed_migration_rolls_back_ddl_and_ledger(database, monkeypatch):
 def test_concurrent_migrators_record_each_version_once(database):
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda _: migrate.apply_migrations(database.engine), range(4)))
-    assert sorted(results) == [0, 0, 0, 6]
+    assert sorted(results) == [0, 0, 0, 7]
     migrate.check_schema(database.engine)
 
 

@@ -14,10 +14,16 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
+    Index,
     UniqueConstraint,
     create_engine,
     event,
 )
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import TypeDecorator
+import json
+
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -209,6 +215,52 @@ class CalibrationAnswer(Base):
     rating: Mapped[int | None] = mapped_column(Integer)
     correct: Mapped[bool] = mapped_column(Boolean, default=False)
     submitted_at: Mapped[int] = mapped_column(BigInteger, default=now)
+
+
+class JobPayload(TypeDecorator):
+    """Native JSONB in production, JSON text in the local SQLite harness."""
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        return dialect.type_descriptor(JSONB() if dialect.name == "postgresql" else Text())
+
+    def process_bind_param(self, value, dialect):
+        return value if dialect.name == "postgresql" else json.dumps(value)
+
+    def process_result_value(self, value, dialect):
+        return value if dialect.name == "postgresql" or value is None else json.loads(value)
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        UniqueConstraint("type", "entity_id", "operation_version"),
+        Index("jobs_ready", "status", "next_attempt_at"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    logical_id: Mapped[str] = mapped_column(String(160), unique=True)
+    type: Mapped[str] = mapped_column(String(24))
+    entity_id: Mapped[str] = mapped_column(String(64))
+    operation_version: Mapped[int] = mapped_column(Integer, default=1)
+    payload: Mapped[dict] = mapped_column(JobPayload, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="accepted")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[int] = mapped_column(BigInteger, default=now)
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[int | None] = mapped_column(BigInteger)
+    fencing_version: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now)
+    updated_at: Mapped[int] = mapped_column(BigInteger, default=now)
+
+
+class JudgmentRequest(Base):
+    __tablename__ = "judgment_requests"
+    wallet: Mapped[str] = mapped_column(ForeignKey(Actor.wallet), primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    body_hash: Mapped[str] = mapped_column(String(64))
+    judgment_id: Mapped[str] = mapped_column(ForeignKey(Judgment.judgment_id))
 
 
 def connect(url):

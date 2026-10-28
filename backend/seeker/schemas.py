@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -71,3 +72,43 @@ class JudgmentSubmit(Strict):
 
     choice: Literal["a", "b", "tie", "cant_tell"] | None = None
     rating: int | None = Field(default=None, ge=1, le=5)
+
+
+class OperationState(str, Enum):
+    accepted = "accepted"
+    pending = "pending"
+    finalized = "finalized"
+    failed = "failed"
+
+
+class JudgmentAccepted(BaseModel):
+    status: Literal["accepted"]
+    judgment_id: str
+    operation_id: str
+
+
+class PayoutView(BaseModel):
+    status: OperationState
+    earned_skr: int
+    signature: str | None
+
+
+class OperationJobView(BaseModel):
+    id: str
+    type: str
+    status: OperationState
+    attempts: int
+    last_error: str | None
+
+
+class JudgmentOperationView(BaseModel):
+    judgment_id: str
+    operation_id: str | None
+    pair_id: str
+    status: OperationState
+    pair_status: str
+    preference: str | None
+    agreement: float | None
+    confidence: float | None
+    payout: PayoutView
+    jobs: list[OperationJobView]

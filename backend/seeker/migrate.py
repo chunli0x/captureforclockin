@@ -14,7 +14,7 @@ from .config import Settings
 from .db import Base, SchemaVersion, connect
 
 BUILD_FAMILY = "SKR"
-REQUIRED_VERSION = "0016"
+REQUIRED_VERSION = "0017"
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 

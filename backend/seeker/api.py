@@ -2,6 +2,7 @@
 uvicorn seeker.api:production_app --factory. Wallet ownership is mandatory."""
 
 import hashlib
+import json
 import secrets
 import functools
 from typing import Annotated, NoReturn
@@ -19,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .chain import Chain, ChainUnavailable
 from .config import Settings
-from .liabilities import reserve_legacy
+from .outbox import enqueue, judgment_view
 from .db import (
     Actor,
     CalibrationAnswer,
@@ -27,6 +28,8 @@ from .db import (
     Challenge,
     Database,
     Judgment,
+    Job,
+    JudgmentRequest,
     JudgmentBatch,
     JudgmentPair,
     Login,
@@ -36,14 +39,14 @@ from .db import (
 from .schemas import (
     Confirm,
     JudgmentSubmit,
+    JudgmentAccepted,
+    JudgmentOperationView,
     LivenessComplete,
     LivenessSession,
     Verify,
     Wallet,
 )
 from .judge_leveling import level_info as judge_level_info
-from .judge_leveling import level_for as judge_level_for
-from .judge_leveling import rate_multiplier as judge_rate_multiplier
 from . import judgment as judgment_mod
 from .liveness import (
     LivenessError,
@@ -309,17 +312,19 @@ def create_app(settings: Settings, *, chain=None):
             actor = lock(db, Actor, actor.wallet)
             if actor.faucet_count >= settings.faucet_max_mints:
                 return {
-                    "funded": True,
+                    "funded": actor.skr_funded,
                     "already": True,
                     "mints": actor.faucet_count,
                     "max": settings.faucet_max_mints,
                 }
-            try:
-                chain.faucet(actor.wallet)
-            except ChainUnavailable as exc:
-                fail(503, f"Test $SKR faucet unavailable: {exc}")
-            actor.skr_funded = True
             actor.faucet_count += 1
+        try:
+            chain.faucet(actor.wallet)
+        except ChainUnavailable:
+            fail(503, "Test $SKR faucet unavailable; reserved quota retained")
+        with database.transaction() as db:
+            actor = lock(db, Actor, actor.wallet)
+            actor.skr_funded = True
         return {
             "funded": True,
             "already": False,
@@ -336,7 +341,7 @@ def create_app(settings: Settings, *, chain=None):
             actor = lock(db, Actor, actor.wallet)
             if not actor.skr_funded:
                 fail(409, "Get test $SKR first")
-            return prepare(db, "deposit", actor.wallet, actor)
+        return prepare("deposit", actor.wallet, actor)
 
     @app.post("/bond/withdraw")
     def bond_withdraw(actor: Auth):
@@ -350,7 +355,7 @@ def create_app(settings: Settings, *, chain=None):
             # withdraw after the first warn; freeze withdrawal once warned.
             if actor.warnings >= 1:
                 fail(403, "Bond has an active warning; withdrawal is frozen")
-            return prepare(db, "withdraw", actor.wallet, actor)
+        return prepare("withdraw", actor.wallet, actor)
 
     @app.post("/bond/{action}/prepare")
     def prepare_bond(action: str, actor: Auth):
@@ -366,22 +371,9 @@ def create_app(settings: Settings, *, chain=None):
                     fail(403, "Bond deposit required")
                 if actor.warnings >= 1:
                     fail(403, "Bond has an active warning; withdrawal is frozen")
-            return prepare(db, action, actor.wallet, actor)
+        return prepare(action, actor.wallet, actor)
 
     # ---- Judgment product (RLHF preference judging) ----
-
-    def rolling_agreement(db, wallet):
-        """Rolling agreement rate (fraction) over the last ``judge_window``
-        resolved judgments this wallet aligned on. 0.0 when there are none."""
-        rows = db.scalars(
-            select(Judgment.aligned)
-            .where(Judgment.wallet == wallet, Judgment.aligned.is_not(None))
-            .order_by(Judgment.submitted_at.desc())
-            .limit(settings.judge_window)
-        ).all()
-        if not rows:
-            return 0.0
-        return sum(1 for a in rows if a) / len(rows)
 
     def calibration_progress(db, wallet):
         answered = db.scalar(
@@ -439,178 +431,6 @@ def create_app(settings: Settings, *, chain=None):
             },
         }
 
-    def _resolve(pair, js):
-        """Pure resolution. Returns ``(winner, aligned_wallets, agreement,
-        confidence)`` on a clean resolve, or a ``(reason, None, None, None)``
-        sentinel — ``reason`` is ``"neutral"`` when a ``cant_tell``/``tie`` vote
-        is present (it must re-route WITHOUT inflating the quorum), or ``"tie"``
-        when substantive votes are an even split (needs one tiebreaker judge).
-
-        Neutral votes never count as dissent: they are excluded from the
-        winner, the aligned set, the agreement denominator, and the quorum
-        (findings #5 and #8)."""
-        substantive = [
-            j for j in js
-            if (pair.task_type == "rating" and j.rating is not None)
-            or (pair.task_type != "rating" and j.choice in ("a", "b"))
-        ]
-        neutral = [
-            j for j in js
-            if (pair.task_type == "rating" and j.rating is None)
-            or (pair.task_type != "rating" and j.choice in ("cant_tell", "tie"))
-        ]
-        if neutral:
-            return "neutral", None, None, None
-        if pair.task_type == "rating":
-            if not substantive:
-                return "tie", None, None, None
-            ratings = [j.rating for j in substantive]
-            median = judgment_mod.median_rating(ratings)
-            aligned = [
-                j.wallet
-                for j in substantive
-                if judgment_mod.is_aligned_rating(j.rating, median)
-            ]
-            winner = str(median)
-        else:
-            winner, _votes = judgment_mod.majority_choice(
-                [j.choice for j in substantive]
-            )
-            if winner is None:
-                return "tie", None, None, None
-            aligned = [j.wallet for j in substantive if j.choice == winner]
-        denom = len(substantive)
-        agreement = len(aligned) / denom if denom else 0.0
-        confidence = agreement * min(1.0, denom / pair.k)
-        return winner, aligned, agreement, confidence
-
-    def _flat_payments_recent(db, wallet, limit):
-        """Count flat "can't tell" payouts this wallet has already earned, to
-        bound abstention farming (finding #12)."""
-        if limit <= 0:
-            return 0
-        return db.scalar(
-            select(func.count())
-            .select_from(Judgment)
-            .where(
-                Judgment.wallet == wallet,
-                Judgment.choice == "cant_tell",
-                Judgment.earned_skr > 0,
-            )
-        ) or 0
-
-    def _substantive_judgments(db, pair_id, task_type):
-        """Non-consumed substantive judgments for ``pair_id``: a/b votes for a
-        preference task, or a 1-5 rating for a rating task. Neutral
-        ``cant_tell``/``tie`` votes are excluded — they never advance or inflate
-        the quorum (finding #8)."""
-        rows = db.scalars(
-            select(Judgment).where(
-                Judgment.pair_id == pair_id, Judgment.consumed.is_(False),
-                Judgment.liability_reserved.is_(True),
-            )
-        ).all()
-        if task_type == "rating":
-            return [j for j in rows if j.rating is not None]
-        return [j for j in rows if j.choice in ("a", "b")]
-
-    def _settle_judgment_obligation(j, pair_id):
-        def persist(prepared):
-            with database.transaction() as db:
-                row = lock(db, Judgment, j.judgment_id)
-                row.payout_transaction = prepared["transaction"]
-                row.payout_pending_signature = prepared["signature"]
-                row.payout_last_valid_height = prepared["last_valid_height"]
-
-        prepared = None
-        if j.payout_transaction:
-            prepared = {"transaction": j.payout_transaction,
-                        "signature": j.payout_pending_signature,
-                        "last_valid_height": j.payout_last_valid_height}
-        try:
-            sig = chain.settle_skr(j.wallet, j.earned_skr, memo=j.judgment_id,
-                                   persist=persist, prepared=prepared)
-        except ChainUnavailable:
-            return False
-        with database.transaction() as db:
-            row = lock(db, Judgment, j.judgment_id)
-            row.payout_signature = sig
-            row.settling = False
-        return True
-
-    def _process_enforcement(pair_id):
-        with database.transaction() as db:
-            ids = list(db.scalars(select(Judgment.judgment_id).where(
-                Judgment.pair_id == pair_id, Judgment.enforcement_requested.is_(True),
-                Judgment.enforcement_complete.is_(False),
-            )))
-        for jid in ids:
-            # Serialize local mirrors per worker; on-chain resolution receipts
-            # protect against retries after commit/confirmation failure too.
-            with database.transaction() as db:
-                wallet = db.get(Judgment, jid).wallet
-                actor = lock(db, Actor, wallet)
-                j = lock(db, Judgment, jid)
-                if j.enforcement_complete:
-                    continue
-                warnings = chain.resolve_judgment(j.wallet, jid, j.enforcement_penalty)
-                j.enforcement_complete = True
-                actor.warnings = min(warnings, 2)
-                if warnings >= 2:
-                    actor.bonded = False
-                    actor.calibrated = False
-                    actor.staked_skr = 0
-
-    def _maybe_anchor_batch(pair_id):
-        """When a batch is fully resolved, compute its Merkle root and commit it
-        on-chain via ``post_batch``. The root is always recorded; ``anchored`` is
-        set only after a confirmed on-chain write so a failed final anchor is
-        durably retried by the next resolution (finding #10)."""
-        anchor = None
-        with database.transaction() as db:
-            pair = db.get(JudgmentPair, pair_id)
-            if pair is None or pair.batch_id is None:
-                return
-            batch = db.get(JudgmentBatch, pair.batch_id)
-            if batch is None or batch.anchored:
-                return
-            unresolved = db.scalar(
-                select(func.count())
-                .select_from(JudgmentPair)
-                .where(
-                    JudgmentPair.batch_id == pair.batch_id,
-                    JudgmentPair.status != "resolved",
-                )
-            )
-            if unresolved:
-                return
-            resolved = db.scalars(
-                select(JudgmentPair).where(
-                    JudgmentPair.batch_id == pair.batch_id,
-                    JudgmentPair.status == "resolved",
-                ).order_by(JudgmentPair.pair_id)
-            ).all()
-            root = judgment_mod.merkle_root(
-                [
-                    (p.pair_id, p.preference or "", p.agreement or 0.0, p.confidence or 0.0)
-                    for p in resolved
-                ]
-            )
-            if root is None:
-                return
-            batch.merkle_root = root
-            anchor = (batch.batch_id, root)
-        try:
-            chain.post_batch(anchor[0], anchor[1])
-        except ChainUnavailable:
-            # Leave anchored=False: the root is recorded and the anchor is
-            # retried on the next resolution/reconcile (finding #10).
-            return
-        with database.transaction() as db:
-            b = db.get(JudgmentBatch, anchor[0])
-            if b is not None:
-                b.anchored = True
-
     @app.get("/judge/next")
     def judge_next(actor: Auth):
         with database.transaction() as db:
@@ -639,14 +459,15 @@ def create_app(settings: Settings, *, chain=None):
             view.update({"kind": "judgment", "calibrated": True, "calibration_remaining": 0})
             return view
 
-    @app.post("/judge/{pair_id}")
-    def judge_submit(pair_id: str, body: JudgmentSubmit, actor: Auth):
+    @app.post("/judge/{pair_id}", responses={202: {"model": JudgmentAccepted}})
+    def judge_submit(pair_id: str, body: JudgmentSubmit, actor: Auth,
+                     idempotency_key: Annotated[str | None, Header(min_length=1, max_length=256)] = None):
         with database.transaction() as db:
             is_calibration = db.get(CalibrationPair, pair_id) is not None
         if is_calibration:
             with database.transaction() as db:
                 return _submit_calibration(db, pair_id, body, actor.wallet)
-        return _submit_judgment(pair_id, body, actor.wallet)
+        return _submit_judgment(pair_id, body, actor.wallet, idempotency_key)
 
     def _submit_calibration(db, pair_id, body, wallet):
         actor = lock(db, Actor, wallet)
@@ -678,134 +499,60 @@ def create_app(settings: Settings, *, chain=None):
                 answered, ncorrect = 0, 0
         return _calibration_status(actor, answered, ncorrect)
 
-    def _settle_and_finalize(pair_id):
-        # All callers enter after committing their submission transaction.
-        with database.transaction() as db:
-            pair = lock(db, JudgmentPair, pair_id)
-            if pair.preference is None:
-                fail(409, "Pair is not yet resolved; retry shortly")
-            result = {"status": "resolved", "preference": pair.preference,
-                      "agreement": pair.agreement, "confidence": pair.confidence}
-            obligations = db.scalars(select(Judgment).where(
-                Judgment.pair_id == pair_id, Judgment.settling.is_(True),
-            )).all()
-        settled = [_settle_judgment_obligation(j, pair_id) for j in obligations]
-        if not all(settled):
-            fail(503, "$SKR payout pending for some judges; retry to reconcile")
-        with database.transaction() as db:
-            pair = lock(db, JudgmentPair, pair_id)
-            if pair.status == "resolving":
-                # Statistics and enforcement decisions commit together, once.
-                # Keep the pair non-final until enforcement has actually landed.
-                pair.status = "enforcing"
-                judges = db.scalars(select(Judgment).where(
-                    Judgment.pair_id == pair_id,
-                ).order_by(Judgment.wallet)).all()
-                for j in judges:
-                    if not j.liability_reserved:
-                        j.consumed = True  # cancel an interrupted submission
-                    if not j.consumed:
-                        actor = lock(db, Actor, j.wallet)
-                        actor.judged_count += 1
-                        actor.agreement_rate = rolling_agreement(db, j.wallet)
-                        j.enforcement_penalty = (
-                            actor.judged_count >= settings.judge_slash_min_judged
-                            and actor.agreement_rate < settings.judge_slash_floor
-                        )
-                    j.enforcement_requested = True
-        _process_enforcement(pair_id)
-        with database.transaction() as db:
-            pair = lock(db, JudgmentPair, pair_id)
-            pair.status = "resolved"
-        _maybe_anchor_batch(pair_id)
-        return result
-
-    def _submit_judgment(pair_id, body, wallet):
-        # Persist the immutable submission ID before reserving collateral. A
-        # failed/unknown reservation is retryable, and cannot count in quorum.
+    def _submit_judgment(pair_id, body, wallet, idempotency_key):
+        body_hash = digest(json.dumps({"pair_id": pair_id, **body.model_dump()},
+                                      sort_keys=True, separators=(",", ":")).encode())
+        key = digest(idempotency_key.encode()) if idempotency_key else None
         with database.transaction() as db:
             pair = lock(db, JudgmentPair, pair_id)
             actor = lock(db, Actor, wallet)
-            if settings.liveness_required and not actor.liveness_completed:
-                fail(403, "Prove you're human before judging")
-            existing = db.scalar(select(Judgment).where(
-                Judgment.pair_id == pair_id, Judgment.wallet == wallet,
-            ))
-            # A participant can reconcile even if this resolution slashed them.
-            if not actor.bonded and existing is None:
-                fail(403, "Deposit the SKR bond to judge")
-            if pair.status != "resolved":
-                reserve_legacy(db, chain, pair_id)
-            reconcile = pair.status in ("resolving", "enforcing", "resolved")
-            if not reconcile:
-                choice, rating = _validate_against_task(pair.task_type, body)
-                if existing is None:
-                    try:
-                        if chain.bond_warnings(wallet) >= 2:
-                            fail(403, "Bond is slashed; deposit a fresh SKR bond to judge")
-                        if chain.bond_vault_balance(wallet) < settings.min_bond:
-                            fail(403, "Bond vault is empty; deposit the SKR bond to judge")
-                    except ChainUnavailable:
-                        fail(403, "Bond is not active on-chain; deposit the SKR bond to judge")
-                    existing = Judgment(pair_id=pair_id, wallet=wallet, choice=choice, rating=rating)
-                    db.add(existing)
-                    db.flush()
-                elif (existing.choice, existing.rating) != (choice, rating):
-                    fail(409, "You already judged this pair")
-        if reconcile:
-            return _settle_and_finalize(pair_id)
-
-        with database.transaction() as db:
-            pair = lock(db, JudgmentPair, pair_id)
-            lock(db, Actor, wallet)
-            j = db.scalar(select(Judgment).where(Judgment.pair_id == pair_id, Judgment.wallet == wallet))
-            if pair.status in ("resolving", "enforcing", "resolved"):
-                reconcile = True
+            prior = db.get(JudgmentRequest, (wallet, key)) if key else None
+            if prior:
+                if prior.body_hash != body_hash:
+                    fail(409, "Idempotency key was used with a different body")
+                j = db.get(Judgment, prior.judgment_id)
             else:
-                if not j.liability_reserved:
-                    # The program checks balance and increments pending in the
-                    # same atomic operation, closing the withdraw/check race.
-                    chain.reserve_judgment(wallet, j.judgment_id)
-                    j.liability_reserved = True
-                neutral = j.choice in ("cant_tell", "tie") or (pair.task_type == "rating" and j.rating is None)
-                if neutral and not j.consumed:
-                    j.consumed = True
-                    j.enforcement_requested = True
-                    if j.choice == "cant_tell":
-                        # Actor is locked, serializing the per-wallet cap.
-                        earned = _flat_payments_recent(db, wallet, settings.judge_flat_cap)
-                        if settings.judge_flat_cap == 0 or earned < settings.judge_flat_cap:
-                            j.earned_skr = settings.judge_flat_skr
-                            j.settling = True
-                db.flush()
-                substantive = _substantive_judgments(db, pair_id, pair.task_type)
-                if len(substantive) >= pair.k:
-                    winner, aligned, agreement, confidence = _resolve(pair, substantive)
-                    if winner == "tie":
-                        pair.status = "rerouted"
-                        pair.k += 1
-                    else:
-                        payouts = {
-                            w: int(settings.judge_base_skr * judge_rate_multiplier(judge_level_for(rolling_agreement(db, w))))
-                            for w in aligned
-                        }
-                        for vote in substantive:
-                            vote.aligned = vote.wallet in aligned
-                            if vote.aligned:
-                                vote.earned_skr = payouts[vote.wallet]
-                                vote.settling = True
-                        pair.status = "resolving"
-                        pair.preference, pair.agreement, pair.confidence = winner, agreement, confidence
-                        reconcile = True
-                elif pair.status == "open":
-                    pair.status = "collecting"
-                status = "rerouted" if neutral or pair.status == "rerouted" else "submitted"
-        if reconcile:
-            return _settle_and_finalize(pair_id)
-        if j.settling and not _settle_judgment_obligation(j, pair_id):
-            fail(503, "$SKR payout pending; retry to reconcile")
-        _process_enforcement(pair_id)
-        return {"status": status}
+                choice, rating = _validate_against_task(pair.task_type, body)
+                j = db.scalar(select(Judgment).where(
+                    Judgment.pair_id == pair_id, Judgment.wallet == wallet))
+                if j and (j.choice, j.rating) != (choice, rating):
+                    fail(409, "You already judged this pair")
+                if j is None:
+                    if settings.liveness_required and not actor.liveness_completed:
+                        fail(403, "Prove you're human before judging")
+                    if not actor.bonded:
+                        fail(403, "Deposit the SKR bond to judge")
+                    if pair.status not in ("open", "collecting", "rerouted"):
+                        fail(409, "Pair no longer accepts judgments")
+                    j = Judgment(pair_id=pair_id, wallet=wallet, choice=choice, rating=rating)
+                    db.add(j)
+                    db.flush()
+                if key:
+                    db.add(JudgmentRequest(wallet=wallet, key=key, body_hash=body_hash,
+                                           judgment_id=j.judgment_id))
+            # This INSERT and the immutable decision share ONE commit. There
+            # is no post-commit enqueue or in-process background callback.
+            operation = enqueue(db, "reservation", j.judgment_id)
+            response = {"status": "accepted", "judgment_id": j.judgment_id,
+                        "operation_id": operation.id}
+        return JSONResponse(status_code=202, content=response)
+
+    @app.get("/judgments/{judgment_id}", response_model=JudgmentOperationView)
+    def get_judgment(judgment_id: str, actor: Auth):
+        with database.transaction() as db:
+            j = db.get(Judgment, judgment_id)
+            if not j or j.wallet != actor.wallet:
+                fail(404, "Judgment not found")
+            return judgment_view(db, j)
+
+    @app.get("/operations/{operation_id}", response_model=JudgmentOperationView)
+    def get_operation(operation_id: str, actor: Auth):
+        with database.transaction() as db:
+            job = db.get(Job, operation_id)
+            j = db.get(Judgment, job.entity_id) if job and job.type == "reservation" else None
+            if not j or j.wallet != actor.wallet:
+                fail(404, "Operation not found")
+            return judgment_view(db, j)
 
     @app.get("/judge/stats")
     def judge_stats(actor: Auth):
@@ -879,24 +626,21 @@ def create_app(settings: Settings, *, chain=None):
 
     # ---- Prepared transactions (bond deposit/withdraw) ----
 
-    def prepare(db, action, target, actor):
-        old = db.scalars(
-            select(Prepared)
-            .where(
-                Prepared.wallet == actor.wallet,
-                Prepared.action == action,
-                Prepared.target == target,
-                Prepared.confirmed.is_(False),
-            )
-            .order_by(Prepared.last_valid_height.desc())
-        ).first()
+    def prepare(action, target, actor):
+        with database.transaction() as db:
+            old = db.scalars(select(Prepared).where(
+                Prepared.wallet == actor.wallet, Prepared.action == action,
+                Prepared.target == target, Prepared.confirmed.is_(False),
+            ).order_by(Prepared.last_valid_height.desc())).first()
         if old and old.last_valid_height >= chain.height():
             return tx_view(old)
         result = chain.prepare(action, actor.wallet)
-        p = Prepared(wallet=actor.wallet, action=action, target=target, **result)
-        db.add(p)
-        db.flush()
-        return tx_view(p)
+        with database.transaction() as db:
+            p = Prepared(wallet=actor.wallet, action=action, target=target, **result)
+            db.add(p)
+            db.flush()
+            enqueue(db, "prepared", p.id)
+            return tx_view(p)
 
     def tx_view(p):
         return {
@@ -943,6 +687,7 @@ def create_app(settings: Settings, *, chain=None):
         # Phase 3: re-acquire the lock and write atomically, tolerating a
         # concurrent confirmation that landed between phases.
         with database.transaction() as db:
+            lock(db, Actor, actor.wallet)
             p = lock(db, Prepared, pid)
             if p.confirmed:
                 if signature and signature != p.signature:
