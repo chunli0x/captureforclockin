@@ -82,7 +82,7 @@ private fun JudgeGuidanceCard() {
     CapturePanel(Modifier.fillMaxWidth()) {
         val beats = listOf(
             "Read" to "Review the task and both outputs.",
-            "Compare" to "Look closely at both images.",
+            "Compare" to "Look closely at both outputs.",
             "Choose" to "Pick the more natural output.",
         )
         beats.forEachIndexed { index, (title, detail) ->
@@ -151,7 +151,11 @@ private fun PairCard(s: PilotState, vm: SeekerViewModel) {
             pair.optString("rubric", "").takeIf { it.isNotBlank() }?.let {
                 Text(it, style = MaterialTheme.typography.bodyMedium, color = CaptureInk)
             }
-            PairChoice(s, vm)
+            if (pair.optString("media_type", "image") == "video") {
+                VideoJudgmentScreen(s, vm)
+            } else {
+                PairChoice(s, vm)
+            }
         }
     }
 }

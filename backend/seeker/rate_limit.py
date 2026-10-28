@@ -149,6 +149,18 @@ class RequestLimitsMiddleware:
             head_size += sum(len(k) + len(v) + 4 for k, v in headers)
             if head_size > settings.max_request_head_bytes:
                 return await reject(431, "Request headers or target too large")
+            body_limit = settings.max_request_body_bytes
+            if path == "/media/ingest" and scope["method"] == "POST":
+                authorization = next((v.decode("latin-1") for k, v in headers if k.lower() == b"authorization"), "")
+                def ingest_authorized():
+                    if not authorization.startswith("Bearer "):
+                        return False
+                    with self.limiter.database.transaction() as db:
+                        login = db.get(Login, _key(authorization[7:]))
+                        return bool(login and login.expires > now() and login.wallet in settings.media_operators)
+                if not await run_in_threadpool(ingest_authorized):
+                    return await reject(403, "Video unavailable")
+                body_limit = settings.media_max_bytes
             for name, value in headers:
                 if name.lower() == b"content-length":
                     try:
@@ -157,7 +169,7 @@ class RequestLimitsMiddleware:
                         return await reject(400, "Invalid Content-Length")
                     if size < 0:
                         return await reject(400, "Invalid Content-Length")
-                    if size > settings.max_request_body_bytes:
+                    if size > body_limit:
                         return await reject(413, "Request body too large")
 
             async def read_body():
@@ -167,7 +179,7 @@ class RequestLimitsMiddleware:
                     if message["type"] == "http.disconnect":
                         return None
                     chunk = message.get("body", b"")
-                    if len(data) + len(chunk) > settings.max_request_body_bytes:
+                    if len(data) + len(chunk) > body_limit:
                         raise OverflowError
                     data.extend(chunk)
                     if not message.get("more_body", False):

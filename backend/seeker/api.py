@@ -5,7 +5,7 @@ import hashlib
 import json
 import secrets
 import functools
-from typing import Annotated, NoReturn
+from typing import Annotated, NoReturn, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
@@ -119,6 +119,8 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request, exc):
+        if request.url.path.startswith("/media/"):
+            return JSONResponse(status_code=422, content={"detail": "Invalid video request"})
         return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(IntegrityError)
@@ -138,6 +140,9 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
             return db.get(Actor, login.wallet)
 
     Auth = Annotated[Actor, Depends(current)]
+    from .media_routes import install_media_routes, video_pair_view, video_ready, require_viewing_opportunity
+    from .db import MediaAccess
+    install_media_routes(app, settings, database, current)
 
     def liveness_fresh(actor):
         return LivenessVerification.from_actor(actor).is_fresh(
@@ -451,7 +456,8 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
         }
 
     @app.get("/judge/next")
-    def judge_next(actor: Auth, exclude_pair_id: Annotated[list[str] | None, Query()] = None):
+    def judge_next(actor: Auth, exclude_pair_id: Annotated[list[str] | None, Query()] = None,
+                   modality: Literal["image", "video", "all"] = "image"):
         # Unpaid, request-scoped exclusions: no vote, liability, or payout is created.
         # Clients retain skipped IDs across subsequent fetches in this session.
         with database.transaction() as db:
@@ -465,19 +471,23 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
             if not actor.bonded:
                 return {"kind": "none", "calibrated": True, "reason": "deposit the SKR bond to judge"}
             done = select(Judgment.pair_id).where(Judgment.wallet == actor.wallet)
-            pair = db.scalars(
+            skipped = select(MediaAccess.pair_id).where(MediaAccess.wallet == actor.wallet, MediaAccess.skipped.is_(True))
+            candidates = db.scalars(
                 select(JudgmentPair)
                 .where(
                     JudgmentPair.status.in_(["open", "collecting", "rerouted"]),
                     JudgmentPair.pair_id.not_in(done),
+                    JudgmentPair.pair_id.not_in(skipped),
+                    JudgmentPair.media_type.in_(["image", "video"] if modality == "all" else [modality]),
                     JudgmentPair.pair_id.not_in(exclude_pair_id or []),
                 )
                 .order_by(JudgmentPair.created_at)
-                .limit(1)
-            ).first()
+            )
+            pair = next((p for p in candidates if p.media_type == "image" or video_ready(db, p)), None)
             if pair is None:
                 return {"kind": "none", "calibrated": True}
-            view = _pair_view(pair)
+            view = (video_pair_view(db, pair, actor.wallet, settings) if pair.media_type == "video"
+                    else _pair_view(pair))
             view.update({"kind": "judgment", "calibrated": True, "calibration_remaining": 0})
             return view
 
@@ -546,6 +556,8 @@ def create_app(settings: Settings, *, chain=None, attestation_verifier: Attestat
                         fail(403, "Deposit the SKR bond to judge")
                     if pair.status not in ("open", "collecting", "rerouted"):
                         fail(409, "Pair no longer accepts judgments")
+                    if pair.media_type == "video":
+                        require_viewing_opportunity(db, pair, wallet)
                     j = Judgment(pair_id=pair_id, wallet=wallet, choice=choice, rating=rating)
                     db.add(j)
                     db.flush()

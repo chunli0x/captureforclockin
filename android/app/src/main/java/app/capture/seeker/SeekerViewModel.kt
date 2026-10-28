@@ -372,10 +372,15 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
             refreshJudgment()
         }
 
+    internal fun videoAuthorization(): String? = token?.let { "Bearer $it" }
+
     fun judgeNext() = run("Loading next pair", "Pair loaded") { refreshJudgment() }
 
-    fun skipUnavailablePair() = run("Skipping unavailable images", "Pair skipped without payment") {
+    fun skipUnavailablePair() = run("Skipping unavailable media", "Pair skipped without payment") {
         val id = mutable.value.judgePair?.getString("pair_id") ?: error("No pair to skip")
+        if (mutable.value.judgePair?.optString("media_type") == "video") {
+            post("/judge/$id/media-skip", JSONObject())
+        }
         mutable.update { it.copy(excludedPairIds = it.excludedPairIds + id, judgePair = null) }
         refreshJudgment()
     }
@@ -411,7 +416,7 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
         refreshTransactions()
         val me = get("/me")
         val exclusions = mutable.value.excludedPairIds.joinToString("&") { "exclude_pair_id=${Uri.encode(it)}" }
-        val next = get("/judge/next" + if (exclusions.isEmpty()) "" else "?$exclusions")
+        val next = get("/judge/next?modality=all" + if (exclusions.isEmpty()) "" else "&$exclusions")
         val stats = get("/judge/stats")
         val level = stats.optInt("level", 0).coerceIn(0, MAX_JUDGE_LEVEL)
         val progress = stats.optJSONObject("calibration_progress")

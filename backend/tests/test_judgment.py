@@ -718,7 +718,7 @@ def test_migration_preserves_legacy_votes_and_reserves_before_consensus(pilot):
     with app.state.database.engine.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE judgments DROP COLUMN liability_legacy")
         conn.exec_driver_sql("DELETE FROM schema_versions WHERE version >= '0015'")
-    assert apply_migrations(app.state.database.engine) == 4
+    assert apply_migrations(app.state.database.engine) == 5
     assert apply_migrations(app.state.database.engine) == 0
     with app.state.database.transaction() as db:
         assert db.query(Judgment).one().liability_legacy

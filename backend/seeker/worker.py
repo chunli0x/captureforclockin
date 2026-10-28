@@ -106,7 +106,7 @@ class Worker:
                             if row.liability_reserved or row.settling or row.enforcement_requested:
                                 enqueue(db, "settlement", row.pair_id)
                         elif cls is JudgmentPair:
-                            if row.status in ("resolving", "enforcing", "resolved"):
+                            if row.status in ("resolving", "enforcing", "resolved", "cancelled"):
                                 enqueue(db, "settlement", row.pair_id)
                         elif cls is JudgmentBatch:
                             unresolved = db.scalar(select(JudgmentPair.pair_id).where(

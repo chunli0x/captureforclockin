@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     # floor, so a swarm of fresh wallets cannot drain the devnet funder.
     faucet_treasury_sol_floor: int = Field(default=1_000_000_000, gt=0)
 
+    # Operator-only prerecorded robot vision video. Empty allowlists disable ingest.
+    media_root: Path = Path("data/media")
+    media_operators: list[str] = Field(default_factory=list)
+    media_reviewers: list[str] = Field(default_factory=list)
+    media_signing_secret: str | None = Field(default=None, min_length=32)
+    media_url_seconds: int = Field(default=120, ge=10, le=300)
+    media_max_bytes: int = Field(default=32 * 1024 * 1024, gt=0, le=64 * 1024 * 1024)
+    sightengine_user: str | None = None
+    sightengine_secret: str | None = None
+
     # ---- Judgment product (RLHF preference judging) ----
     # Consensus-gated pay in test $SKR (6 decimals, not real value). All are starting
     # hypotheses (incentive spec §8): tune against real agreement data, not once.

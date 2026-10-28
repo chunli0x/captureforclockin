@@ -134,7 +134,7 @@ class Settlement:
         with self.transaction() as db:
             j = db.get(Judgment, jid)
             pair = db.get(JudgmentPair, j.pair_id)
-            if j.enforcement_requested or j.enforcement_complete or pair.status in ("resolving", "enforcing", "resolved"):
+            if j.enforcement_requested or j.enforcement_complete or pair.status in ("resolving", "enforcing", "resolved", "cancelled"):
                 enqueue(db, "settlement", j.pair_id)
                 return
             if j.liability_legacy and j.consumed:
@@ -142,6 +142,11 @@ class Settlement:
                 j.enforcement_requested = True
                 enqueue(db, "settlement", j.pair_id)
                 return
+            if pair.media_type == "video":
+                from .media_routes import video_ready
+                if not video_ready(db, pair):
+                    enqueue(db, "settlement", j.pair_id)
+                    return
             reserved = j.liability_reserved
         if not reserved:
             # The program atomically checks the collateral and reserves it;
@@ -150,7 +155,7 @@ class Settlement:
         with self.transaction() as db:
             pair = lock(db, JudgmentPair, j.pair_id)
             row = lock(db, Judgment, jid)
-            if pair.status not in ("resolving", "enforcing", "resolved"):
+            if pair.status not in ("resolving", "enforcing", "resolved", "cancelled"):
                 row.liability_reserved = True
                 row.liability_legacy = False
             enqueue(db, "settlement", row.pair_id)
@@ -159,9 +164,21 @@ class Settlement:
         settings = self.settings
         with self.transaction() as db:
             pair = lock(db, JudgmentPair, pair_id)
-            if pair.status in ("resolving", "enforcing", "resolved"):
+            if pair.status in ("resolving", "enforcing", "resolved", "cancelled"):
                 return
             votes = list(db.scalars(select(Judgment).where(Judgment.pair_id == pair_id).order_by(Judgment.wallet)))
+            if pair.media_type == "video":
+                from .media_routes import video_ready
+                if not video_ready(db, pair):
+                    # A revoked pair can never reach quorum. Release/tombstone
+                    # every accepted liability, including a lost reserve callback.
+                    # Existing monetary obligations are still honored below.
+                    pair.status = "cancelled"
+                    for vote in votes:
+                        vote.consumed = True
+                        vote.enforcement_requested = True
+                        vote.enforcement_penalty = False
+                    return
             # Pre-upgrade accepted votes must all be reserved before new votes
             # can resolve their pair, as in the former legacy reservation gate.
             if any(j.liability_legacy and not j.consumed for j in votes):
@@ -270,6 +287,8 @@ class Settlement:
                     actor.bonded, actor.calibrated, actor.staked_skr = False, False, 0
         with self.transaction() as db:
             pair = lock(db, JudgmentPair, pair_id)
+            if pair.status == "cancelled":
+                return
             if pair.status in ("enforcing", "resolved"):
                 pair.status = "resolved"
                 enqueue(db, "anchor", pair.batch_id)

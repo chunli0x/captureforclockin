@@ -145,6 +145,8 @@ class JudgmentPair(Base):
     batch_id: Mapped[str] = mapped_column(ForeignKey(JudgmentBatch.batch_id), index=True)
     media_type: Mapped[str] = mapped_column(String(16), default="image")
     task_type: Mapped[str] = mapped_column(String(16), default="preference")
+    asset_a_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.asset_id"))
+    asset_b_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.asset_id"))
     output_a_url: Mapped[str | None] = mapped_column(String(512))
     output_b_url: Mapped[str | None] = mapped_column(String(512))
     rubric: Mapped[str | None] = mapped_column(String(1024))
@@ -298,3 +300,51 @@ class Database:
     def transaction(self):
         with self.factory.begin() as session:
             yield session
+
+
+class MediaAsset(Base):
+    __tablename__ = "media_assets"
+    asset_id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    status: Mapped[str] = mapped_column(String(24), default="quarantined", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    approved_by: Mapped[str | None] = mapped_column(ForeignKey(Actor.wallet))
+    approved_at: Mapped[int | None] = mapped_column(BigInteger)
+    approved_hash: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now)
+
+
+class MediaVariant(Base):
+    __tablename__ = "media_variants"
+    __table_args__ = (UniqueConstraint("asset_id", "version"),)
+    variant_id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    asset_id: Mapped[str] = mapped_column(ForeignKey(MediaAsset.asset_id), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    sha256: Mapped[str] = mapped_column(String(64))
+    dhashes: Mapped[str] = mapped_column(Text)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    fps: Mapped[int] = mapped_column(Integer)
+    byte_size: Mapped[int] = mapped_column(BigInteger)
+
+
+class IngestJob(Base):
+    __tablename__ = "ingest_jobs"
+    job_id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    asset_id: Mapped[str] = mapped_column(ForeignKey(MediaAsset.asset_id), unique=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(32))
+    lease_until: Mapped[int | None] = mapped_column(BigInteger)
+    error_code: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now)
+
+
+class MediaAccess(Base):
+    __tablename__ = "media_access"
+    wallet: Mapped[str] = mapped_column(ForeignKey(Actor.wallet), primary_key=True)
+    pair_id: Mapped[str] = mapped_column(ForeignKey(JudgmentPair.pair_id), primary_key=True)
+    served_a_at: Mapped[int | None] = mapped_column(BigInteger)
+    served_b_at: Mapped[int | None] = mapped_column(BigInteger)
+    skipped: Mapped[bool] = mapped_column(Boolean, default=False)

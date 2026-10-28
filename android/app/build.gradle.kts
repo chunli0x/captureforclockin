@@ -175,6 +175,8 @@ dependencies {
     implementation(libs.camerax.video)
     implementation(libs.mlkit.face.detection)
     implementation(libs.litert)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
 
     testImplementation(libs.junit)
 }
