@@ -130,7 +130,7 @@ class Worker:
 
 
 def main():
-    from .chain import Chain
+    from .signing_chain import SigningChain
     from .config import Settings
     from .migrate import check_schema
     parser = argparse.ArgumentParser(description=__doc__)
@@ -144,7 +144,9 @@ def main():
         signal.signal(sig, lambda *_: stop.set())
     try:
         check_schema(database.engine)
-        worker = Worker(database, Chain(settings), settings)
+        chain = SigningChain(settings)
+        log.info("Worker signer readiness: %s", chain.check_signers())
+        worker = Worker(database, chain, settings)
         next_reconcile = 0
         while not stop.is_set():
             try:

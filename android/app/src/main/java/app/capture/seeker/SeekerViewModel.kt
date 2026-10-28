@@ -63,6 +63,7 @@ data class PilotState(
     val livenessChallenge: String? = null,
     val faucetMints: Int = 0,
     val faucetMaxMints: Int = 5,
+    val pendingFaucetId: String? = null,
     val judgeStakedSkr: Long = 0,
     val judgeWarnings: Int = 0,
     // --- Judgment product (RLHF preference judging) ---
@@ -271,9 +272,34 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun faucet() =
         run("Requesting test \$SKR", "Test \$SKR funded") {
-            val r = post("/bond/faucet")
+            val recoveryKey = "faucet.${mutable.value.server}.${mutable.value.wallet}"
+            val previous = prefs.getString(recoveryKey, null)
+            var r = if (previous != null) get("/operations/$previous") else post("/bond/faucet")
+            val operationId = r.optString("operation_id")
+            if (operationId.isNotBlank()) {
+                prefs.edit().putString(recoveryKey, operationId).apply()
+                mutable.update { it.copy(pendingFaucetId = operationId) }
+            }
+            var polls = 0
+            while (operationId.isNotBlank() && r.optString("status") in setOf("accepted", "pending") && polls < 60) {
+                delay(1500)
+                r = get("/operations/$operationId")
+                polls++
+            }
+            if (r.optString("status") in setOf("finalized", "failed")) {
+                prefs.edit().remove(recoveryKey).apply()
+                mutable.update { it.copy(pendingFaucetId = null) }
+            }
+            refreshJudgment()
+            check(r.optString("status") != "failed") {
+                "Faucet failed; reserved quota retained."
+            }
+            check(operationId.isBlank() || r.optString("status") == "finalized") {
+                "Faucet still pending. Tap again to resume checking."
+            }
+            check(r.optBoolean("funded")) { "Faucet quota exhausted; wallet is not funded." }
             mutable.update {
-                it.copy(bondFunded = true, faucetMints = r.optInt("mints", it.faucetMints + 1))
+                it.copy(bondFunded = true, faucetMints = r.optInt("mints", it.faucetMints))
             }
         }
 
@@ -367,6 +393,7 @@ class SeekerViewModel(application: Application) : AndroidViewModel(application) 
                 livenessCompleted = me.optBoolean("liveness_completed", false),
                 faucetMints = me.optInt("faucet_mints", 0),
                 faucetMaxMints = me.optInt("faucet_max", 5),
+                pendingFaucetId = prefs.getString("faucet.${it.server}.${it.wallet}", null),
                 judgeStakedSkr = stats.optLong("staked_skr", 0),
                 judgeWarnings = stats.optInt("warnings", 0),
                 judgePair = pair,

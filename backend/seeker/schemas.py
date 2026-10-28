@@ -112,3 +112,15 @@ class JudgmentOperationView(BaseModel):
     confidence: float | None
     payout: PayoutView
     jobs: list[OperationJobView]
+
+
+class FaucetOperationView(BaseModel):
+    operation_id: str
+    type: Literal["faucet"]
+    status: OperationState
+    funded: bool
+    already: bool
+    mints: int
+    max: int
+    signature: str | None
+    last_error: str | None

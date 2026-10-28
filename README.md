@@ -111,7 +111,7 @@ curl -s http://localhost:8000/health
 Notes:
 
 - The backend listens on port 8000.
-- `dev_bootstrap.sh` generates a dev-only verifier keypair and writes it to `backend/.env`. The real verifier key is never committed. Anything needing the real verifier on-chain will fail until you point `SEEKER_VERIFIER_KEY_FILE` at your own keypair.
+- `dev_bootstrap.sh` generates a dev-only verifier keypair and writes it to `backend/.env`. The real verifier key is never committed. Set `SEEKER_VERIFIER_PUBKEY` to the on-chain verifier for the API. Only the worker receives `SEEKER_VERIFIER_KEY_FILE` and `SEEKER_TREASURY_KEY_FILE`; see [signer configuration](docs/judgment-api-contract.md#signer-separation).
 - No Docker? Use SQLite: set `SEEKER_LOCAL_SQLITE=true` and `SEEKER_DATABASE_URL=sqlite:///./seeker.db`.
 - The dependency set is tested on Python 3.11. On a newer minor, run `PYTHON=python3.11 ./scripts/dev_bootstrap.sh`.
 

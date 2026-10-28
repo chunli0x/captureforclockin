@@ -1,7 +1,7 @@
 """Worker-only settlement. Every chain call is between short fenced transactions."""
 from sqlalchemy import select, func
 
-from .db import Actor, Judgment, JudgmentPair, JudgmentBatch, Prepared
+from .db import Job, Actor, Judgment, JudgmentPair, JudgmentBatch, Prepared
 from .outbox import enqueue, Waiting
 from . import judgment as judgment_mod
 from .judge_leveling import level_for, rate_multiplier
@@ -111,6 +111,24 @@ class Settlement:
 
     def transaction(self):
         return self.worker.transaction(self.lease)
+
+    def faucet(self, wallet):
+        with self.transaction() as db:
+            job = db.get(Job, self.lease.id)
+            if job.payload.get("signature"):
+                return
+            prepared = job.payload.get("prepared")
+
+        def persist(prepared):
+            with self.transaction() as db:
+                job = db.get(Job, self.lease.id)
+                job.payload = {**job.payload, "prepared": prepared}
+
+        signature = self.chain.faucet(wallet, persist=persist, prepared=prepared)
+        with self.transaction() as db:
+            job = db.get(Job, self.lease.id)
+            job.payload = {**job.payload, "signature": signature}
+            lock(db, Actor, wallet).skr_funded = True
 
     def reservation(self, jid):
         with self.transaction() as db:

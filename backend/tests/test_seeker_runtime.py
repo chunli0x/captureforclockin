@@ -6,7 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from seeker.chain import RENT, SYSTEM, Chain, discriminator, meta
+from seeker.chain import RENT, SYSTEM, discriminator, meta
+from seeker.signing_chain import SigningChain as Chain
 from solders.account import Account
 from solders.instruction import Instruction
 from solders.keypair import Keypair
@@ -392,3 +393,42 @@ def test_chain_retry_recovers_finalized_receipt_after_confirmation_loss(runtime)
     assert sig == journal[-1]["signature"]
     assert len(sent) == 1 and len(journal) == 1
     assert balance(runtime, worker.pubkey(), chain.skr) == 10_025
+
+
+def test_worker_faucet_mints_tokens_and_sol_once_after_confirmation_loss(runtime):
+    import base64
+    from seeker.chain import ChainUnavailable
+    svm, chain, admin, wallet, _other, _verifier = runtime
+    chain.treasury = admin
+    chain.settings.faucet_sol_lamports = 50_000_000
+    chain.settings.faucet_treasury_sol_floor = 1_000_000_000
+    journal, sends = [], []
+    confirmed = False
+    before_sol = svm.get_balance(wallet.pubkey())
+
+    def rpc(method, params):
+        if method == "getBalance":
+            return {"value": svm.get_balance(Pubkey.from_string(params[0]))}
+        if method == "getLatestBlockhash":
+            return {"value": {"blockhash": str(svm.latest_blockhash()), "lastValidBlockHeight": 100}}
+        if method == "sendTransaction":
+            assert journal[-1]["transaction"] == params[0]
+            tx = Transaction.from_bytes(base64.b64decode(params[0]))
+            tx.verify()
+            ok(svm.send_transaction(tx))
+            sends.append(str(tx.signatures[0]))
+            return sends[-1]
+        if method == "getSignatureStatuses":
+            if not confirmed:
+                raise ChainUnavailable("lost confirmation")
+            return {"value": [{"err": None, "confirmationStatus": "finalized"}]}
+        raise AssertionError(method)
+
+    chain.rpc = rpc
+    with pytest.raises(ChainUnavailable, match="lost confirmation"):
+        chain.faucet(str(wallet.pubkey()), persist=journal.append)
+    assert balance(runtime, wallet.pubkey(), chain.skr) == 10_000 + chain.settings.min_bond
+    assert svm.get_balance(wallet.pubkey()) == before_sol + chain.settings.faucet_sol_lamports
+    confirmed = True
+    assert chain.faucet(str(wallet.pubkey()), persist=journal.append, prepared=journal[0]) == sends[0]
+    assert len(sends) == len(journal) == 1

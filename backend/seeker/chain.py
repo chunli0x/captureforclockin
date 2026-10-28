@@ -1,25 +1,23 @@
-"""Real Solana RPC + exact-message confirmation. No simulated payment path."""
+"""Public Solana RPC, unsigned user transactions and exact-message confirmation.
+
+This API client never loads private keys. Signing lives in signing_chain.py.
+"""
 
 import base64
 import hashlib
-import json
 import struct
 import time
 from urllib.parse import urlparse
-from types import SimpleNamespace
 
 import httpx
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
-from solders.keypair import Keypair
 from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.signature import Signature
-from solders.system_program import transfer, TransferParams
 from solders.transaction import Transaction, TransactionError
 from spl.token.constants import ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID
-from spl.token.instructions import get_associated_token_address, mint_to
-from spl.token.models import MintToParams
+from spl.token.instructions import get_associated_token_address
 
 SYSTEM = Pubkey.default()
 RENT = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
@@ -89,25 +87,15 @@ class Chain:
         self.settings = settings
         self.program = Pubkey.from_string(settings.program_id)
         self.skr = Pubkey.from_string(settings.skr_mint)
-        self.verifier = Keypair.from_bytes(
-            bytes(json.loads(settings.verifier_key_file.read_text()))
-        )
+        # Public configuration only. Never inspect key-file settings here.
+        verifier = getattr(settings, "verifier_pubkey", None)
+        if not verifier:
+            raise ChainUnavailable("SEEKER_VERIFIER_PUBKEY is required for read-only chain access")
+        self.verifier_pubkey = Pubkey.from_string(verifier)
+        treasury = getattr(settings, "treasury_pubkey", None)
+        self.treasury_pubkey = Pubkey.from_string(treasury) if treasury else None
         self.config = self.pda(b"config")
         self.penalty_vault = self.pda(b"penalty-vault", bytes(self.skr))
-        # Devnet treasury: holds the $SKR mint authority (the faucet, the bond,
-        # and the settle_skr payout — one token, three jobs). Absent means the
-        # on-chain mint is unavailable and the backend fails closed instead of
-        # fabricating it.
-        self.treasury = self._load_key(getattr(settings, "treasury_key_file", None))
-
-    @staticmethod
-    def _load_key(path):
-        if path is None:
-            return None
-        try:
-            return Keypair.from_bytes(bytes(json.loads(path.read_text())))
-        except (OSError, ValueError, TypeError):
-            return None
 
     def pda(self, *seeds):
         return Pubkey.find_program_address(list(seeds), self.program)[0]
@@ -150,10 +138,10 @@ class Chain:
         # == 144 bytes. slash_authority is the verifier key (the backend reuses
         # it; no separate authority keypair).
         expected = (
-            bytes(self.verifier.pubkey())
+            bytes(self.verifier_pubkey)
             + bytes(self.skr)
             + struct.pack("<Q", self.settings.min_bond)
-            + bytes(self.verifier.pubkey())
+            + bytes(self.verifier_pubkey)
         )
         if (
             len(raw) != 144
@@ -195,7 +183,7 @@ class Chain:
             # slash_authority, config, bond (seeds=['bond', worker]). The worker
             # pubkey travels in the instruction data (no separate account).
             accounts = [
-                meta(self.verifier.pubkey(), True),
+                meta(self.verifier_pubkey, True),
                 meta(self.config),
                 meta(bond, writable=True),
             ]
@@ -207,7 +195,7 @@ class Chain:
             # penalty_vault (writable, seeds=['penalty-vault', config]),
             # token_program. Full slash: data == discriminator + worker (no amount).
             accounts = [
-                meta(self.verifier.pubkey(), True),
+                meta(self.verifier_pubkey, True),
                 meta(self.config),
                 meta(bond, writable=True),
                 meta(bond_vault, writable=True),
@@ -220,6 +208,8 @@ class Chain:
         return prefix + [Instruction(self.program, data, accounts)]
 
     def prepare(self, action, wallet):
+        if action not in {"deposit", "withdraw"}:
+            raise ChainUnavailable("Only user-signed bond actions may be prepared")
         self.check_environment()
         result = self.rpc("getLatestBlockhash", [{"commitment": "finalized"}])["value"]
         blockhash = Hash.from_string(result["blockhash"])
@@ -234,48 +224,6 @@ class Chain:
             "message_hash": message_fingerprint(msg),
             "last_valid_height": result["lastValidBlockHeight"],
         }
-
-    def _sign_and_send(self, instructions, payer):
-        """Serialize, fully sign with ``payer``, and broadcast. Returns the
-        transaction signature string. Raises ChainUnavailable on any RPC
-        failure — fail closed, never fabricate a settlement."""
-        result = self.rpc("getLatestBlockhash", [{"commitment": "finalized"}])["value"]
-        blockhash = Hash.from_string(result["blockhash"])
-        msg = Message.new_with_blockhash(instructions, payer.pubkey(), blockhash)
-        tx = Transaction.new_unsigned(msg)
-        tx.sign([payer], blockhash)
-        return self.rpc(
-            "sendTransaction",
-            [
-                base64.b64encode(bytes(tx)).decode(),
-                {"encoding": "base64", "preflightCommitment": "finalized"},
-            ],
-        )
-
-    def _confirm_sent(self, signature, deadline_s=20.0):
-        """Poll a just-broadcast signature until it finalizes or fails.
-
-        ``sendTransaction`` returning a signature only means the RPC accepted
-        the submit — not that the transaction landed or executed. Reconcile
-        here before any caller records a completed payment, slash, or anchor.
-        Raises ChainUnavailable if it does not confirm.
-        """
-        deadline = time.monotonic() + deadline_s
-        while True:
-            r = self.rpc(
-                "getSignatureStatuses",
-                [[signature], {"searchTransactionHistory": True}],
-            )
-            statuses = r.get("value") or []
-            st = statuses[0] if statuses else None
-            if st is not None:
-                if st.get("err") is not None:
-                    raise ChainUnavailable("Transaction failed to execute")
-                if st.get("confirmationStatus") == "finalized":
-                    return True
-            if time.monotonic() > deadline:
-                raise ChainUnavailable("Transaction did not confirm in time")
-            time.sleep(0.5)
 
     def bond_warnings(self, wallet):
         """Read the worker's on-chain bond ``warnings`` counter (0 = clean,
@@ -314,59 +262,6 @@ class Chain:
             raise ChainUnavailable("Worker bond vault is not initialized")
         return int(value["amount"])
 
-    def issue(self, action, wallet, amount=None):
-        """Server-side warn/slash: the backend is the slash_authority (the
-        verifier key), so it builds, signs and broadcasts the instruction
-        itself — no client signature. Returns the signature. Confirms
-        execution before returning so a slash is never recorded without
-        landing on-chain."""
-        instructions = self.build(action, wallet, amount=amount)
-        sig = self._sign_and_send(instructions, self.verifier)
-        self._confirm_sent(sig)
-        return sig
-
-    def faucet(self, wallet):
-        """Mint the minimum test SKR bond and drop a little SOL so the worker
-        can pay the deposit fee + bond/vault rent. The treasury is the $SKR
-        mint authority AND the SOL funder. Raises ChainUnavailable when the
-        treasury keypair is not configured."""
-        if self.treasury is None:
-            raise ChainUnavailable("$SKR treasury (mint authority) is not configured")
-        worker = Pubkey.from_string(wallet)
-        payer = self.treasury
-        # Global faucet budget: keep a SOL floor in the treasury for payouts,
-        # so a swarm of fresh wallets cannot drain the devnet funder.
-        treasury_sol = self.rpc("getBalance", [str(payer.pubkey())])["value"]
-        if treasury_sol - self.settings.faucet_sol_lamports < self.settings.faucet_treasury_sol_floor:
-            raise ChainUnavailable("test $SKR faucet SOL budget exhausted")
-        instructions = [ata_instruction(payer.pubkey(), worker, self.skr)]
-        instructions.append(
-            mint_to(
-                MintToParams(
-                    program_id=TOKEN_PROGRAM_ID,
-                    mint=self.skr,
-                    dest=get_associated_token_address(worker, self.skr),
-                    mint_authority=payer.pubkey(),
-                    amount=self.settings.min_bond,
-                    signers=[payer.pubkey()],
-                )
-            )
-        )
-        # The deposit is client-signed with payer=worker, so the worker needs
-        # lamports to pay the transaction fee and the bond/vault rent.
-        instructions.append(
-            transfer(
-                TransferParams(
-                    from_pubkey=payer.pubkey(),
-                    to_pubkey=worker,
-                    lamports=self.settings.faucet_sol_lamports,
-                )
-            )
-        )
-        sig = self._sign_and_send(instructions, payer)
-        self._confirm_sent(sig)
-        return sig
-
     def _account_data(self, address):
         account = self.rpc("getAccountInfo", [str(address), {
             "encoding": "base64", "commitment": "finalized",
@@ -379,140 +274,6 @@ class Chain:
             return base64.b64decode(account["data"][0], validate=True)
         except (ValueError, KeyError, TypeError) as exc:
             raise ChainUnavailable("Invalid receipt data") from exc
-
-    def reserve_judgment(self, wallet, resolution_id):
-        worker = Pubkey.from_string(wallet)
-        rid = bytes.fromhex(resolution_id)
-        liability = self.pda(b"liability", bytes(worker), rid)
-        raw = self._account_data(liability)
-        if raw is not None:
-            if (len(raw) != 59 or raw[:56] != discriminator("Liability", "account") + bytes(worker) + rid
-                    or raw[56] != 0):
-                raise ChainUnavailable("Invalid or already resolved liability")
-            return
-        ix = Instruction(self.program, discriminator("reserve_judgment") + bytes(worker) + rid, [
-            meta(self.verifier.pubkey(), True, True), meta(self.config),
-            meta(self.pda(b"bond", bytes(worker)), writable=True),
-            meta(self.pda(b"bond-vault", bytes(worker), bytes(self.skr))),
-            meta(liability, writable=True), meta(SYSTEM),
-        ])
-        sig = self._sign_and_send([ix], self.verifier)
-        self._confirm_sent(sig)
-
-    def resolve_judgment(self, wallet, resolution_id, penalize):
-        worker = Pubkey.from_string(wallet)
-        rid = bytes.fromhex(resolution_id)
-        liability = self.pda(b"liability", bytes(worker), rid)
-        raw = self._account_data(liability)
-        if raw is not None and (len(raw) != 59 or raw[:56] != discriminator("Liability", "account") + bytes(worker) + rid):
-            raise ChainUnavailable("Missing or invalid judgment liability")
-        if raw is not None and raw[56]:
-            if raw[57] != int(penalize):
-                raise ChainUnavailable("Resolution does not match journal")
-            return self.bond_warnings(wallet)
-        ix = Instruction(self.program, discriminator("resolve_judgment") + bytes(worker) + rid + bytes([penalize]), [
-            meta(self.verifier.pubkey(), True, True), meta(self.config),
-            meta(self.pda(b"bond", bytes(worker)), writable=True),
-            meta(self.pda(b"bond-vault", bytes(worker), bytes(self.skr)), writable=True),
-            meta(liability, writable=True), meta(self.penalty_vault, writable=True), meta(TOKEN_PROGRAM_ID), meta(SYSTEM),
-        ])
-        sig = self._sign_and_send([ix], self.verifier)
-        self._confirm_sent(sig)
-        return self.bond_warnings(wallet)
-
-    def settle_skr(self, wallet, amount, memo, *, persist, prepared=None):
-        """Verify a receipt on retry; journal signed bytes before any broadcast.
-
-        The program atomically mints and creates an immutable, fully bound
-        receipt. An expired transaction can safely be rebuilt: concurrent or
-        late submissions cannot mint twice, because they share that receipt.
-        """
-        if self.treasury is None:
-            raise ChainUnavailable("$SKR treasury (mint authority) is not configured")
-        worker, payer = Pubkey.from_string(wallet), self.treasury
-        payment_id = hashlib.sha256(memo.encode()).digest()[:16]
-        receipt = self.pda(b"payment-v2", bytes(self.skr), bytes(worker), struct.pack("<Q", amount), payment_id)
-        instructions = [ata_instruction(payer.pubkey(), worker, self.skr), Instruction(
-            self.program,
-            discriminator("record_payment") + payment_id + bytes(worker) + struct.pack("<Q", amount),
-            [meta(payer.pubkey(), True, True), meta(self.config), meta(self.skr, writable=True),
-             meta(receipt, writable=True), meta(get_associated_token_address(worker, self.skr), writable=True),
-             meta(SYSTEM), meta(TOKEN_PROGRAM_ID)],
-        )]
-        fingerprint = message_fingerprint(Message.new_with_blockhash(instructions, payer.pubkey(), Hash.default()))
-        raw = self._account_data(receipt)
-        if raw is not None:
-            expected = (discriminator("Payment", "account") + bytes(payer.pubkey()) + bytes(worker)
-                        + bytes(self.skr) + struct.pack("<Q", amount) + payment_id)
-            if raw != expected:
-                raise ChainUnavailable("Payment receipt does not match obligation")
-            return self.find_signature(SimpleNamespace(message_hash=fingerprint), address=receipt)
-
-        # Old receipts did not bind the payment. Only the actual, exactly
-        # matching finalized mint transaction can prove a legacy payout.
-        legacy = self.pda(b"payment", payment_id)
-        if self._account_data(legacy) is not None:
-            old = [instructions[0], Instruction(self.program, discriminator("record_payment") + payment_id,
-                [meta(payer.pubkey(), True, True), meta(legacy, writable=True), meta(SYSTEM)]),
-                mint_to(MintToParams(program_id=TOKEN_PROGRAM_ID, mint=self.skr,
-                    dest=get_associated_token_address(worker, self.skr), mint_authority=payer.pubkey(),
-                    amount=amount, signers=[payer.pubkey()])), Instruction(MEMO_PROGRAM, memo.encode(), [])]
-            old_hash = message_fingerprint(Message.new_with_blockhash(old, payer.pubkey(), Hash.default()))
-            return self.find_signature(SimpleNamespace(message_hash=old_hash), address=legacy)
-
-        if prepared is None or self.height() > prepared["last_valid_height"]:
-            result = self.rpc("getLatestBlockhash", [{"commitment": "finalized"}])["value"]
-            blockhash = Hash.from_string(result["blockhash"])
-            tx = Transaction.new_unsigned(Message.new_with_blockhash(instructions, payer.pubkey(), blockhash))
-            tx.sign([payer], blockhash)
-            prepared = {"transaction": base64.b64encode(bytes(tx)).decode(),
-                        "signature": str(tx.signatures[0]), "last_valid_height": result["lastValidBlockHeight"]}
-            persist(prepared)  # must commit before sendTransaction
-        tx = Transaction.from_bytes(base64.b64decode(prepared["transaction"], validate=True))
-        tx.verify()
-        if message_fingerprint(tx.message) != fingerprint or str(tx.signatures[0]) != prepared["signature"]:
-            raise ChainUnavailable("Journaled payment does not match obligation")
-        self.rpc("sendTransaction", [prepared["transaction"], {
-            "encoding": "base64", "preflightCommitment": "finalized",
-        }])
-        self._confirm_sent(prepared["signature"])
-        return prepared["signature"]
-
-    def post_batch(self, batch_id: str, merkle_root: str) -> str:
-        """Anchor a resolved batch's Merkle root on-chain (append-only PDA).
-
-        ``batch_id`` is 32 hex chars (16 bytes); ``merkle_root`` is 64 hex
-        chars (32 bytes). Server-signed by the verifier (slash_authority), which
-        is the anchor authority. The ``init`` batch account makes it append-only:
-        retries verify the exact finalized account before attempting a write.
-        """
-        batch_bytes = bytes.fromhex(batch_id)
-        root_bytes = bytes.fromhex(merkle_root)
-        batch_pda = self.pda(b"batch", batch_bytes)
-        raw = self._account_data(batch_pda)
-        if raw is not None:
-            if raw != discriminator("Batch", "account") + root_bytes:
-                raise ChainUnavailable("Batch receipt does not match immutable root")
-            return str(batch_pda)  # Exact finalized receipt proves the anchor.
-        instructions = [
-            Instruction(
-                self.program,
-                discriminator("post_batch") + batch_bytes + root_bytes,
-                [
-                    meta(self.verifier.pubkey(), True, True),  # payer (init)
-                    meta(self.config),
-                    meta(batch_pda, writable=True),
-                    meta(SYSTEM),
-                    meta(RENT),
-                ],
-            )
-        ]
-        sig = self._sign_and_send(instructions, self.verifier)
-        # Finding C (blockchain-dev review): confirm before returning, so a
-        # broadcast-but-failed anchor raises ChainUnavailable and leaves
-        # anchored=False for the reconcile pass (migration 0013 contract).
-        self._confirm_sent(sig)
-        return sig
 
     def height(self):
         return self.rpc("getBlockHeight", [{"commitment": "finalized"}])

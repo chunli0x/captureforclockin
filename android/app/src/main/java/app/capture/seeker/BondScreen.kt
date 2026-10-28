@@ -89,12 +89,12 @@ private fun BondCard(s: PilotState, vm: SeekerViewModel, sender: ActivityResultS
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Deposit bond") }
                 }
-                if (s.faucetMints < s.faucetMaxMints) {
+                if (s.faucetMints < s.faucetMaxMints || s.pendingFaucetId != null) {
                     Button(
                         onClick = { vm.faucet() },
                         enabled = !s.busy,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Get test \$SKR (${s.faucetMints}/${s.faucetMaxMints})") }
+                    ) { Text(if (s.pendingFaucetId != null) "Check faucet" else "Get test \$SKR (${s.faucetMints}/${s.faucetMaxMints})") }
                 }
                 if (!s.bondFunded)
                     Text(

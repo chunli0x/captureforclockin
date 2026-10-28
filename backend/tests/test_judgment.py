@@ -78,7 +78,7 @@ class FakeChain:
             self.settled_skr.append((wallet, amount))
         return self.payments[memo]
 
-    def faucet(self, wallet):
+    def faucet(self, wallet, *, persist, prepared=None):
         return str(Keypair().sign_message(b"faucet"))
 
     def post_batch(self, batch_id, merkle_root):
@@ -201,7 +201,8 @@ def calibrate(c, h, pair_ids, correct):
 
 
 def bond(c, h):
-    assert c.post("/bond/faucet", headers=h).status_code == 200
+    assert c.post("/bond/faucet", headers=h).status_code == 202
+    run_work(c.app)
     tx = c.post("/bond/deposit", headers=h).json()
     sig = str(Keypair().sign_message(tx["id"].encode()))
     r = c.post(f"/transactions/{tx['id']}/confirm", headers=h, json={"signature": sig})
@@ -226,7 +227,7 @@ def test_skr_wire_contract_matches_storage(pilot):
     c, app, headers, keys, _chain, settings = pilot
     health = c.get("/health").json()
     assert health["skr_mint"] == settings.skr_mint
-    assert health["skr_payout"] == "unavailable"
+    assert "skr_payout" not in health  # API cannot attest to worker signer readiness
     assert health["test_tokens"] is True
     assert not any("usdc" in key for key in health)
 
@@ -248,7 +249,8 @@ def test_skr_wire_contract_matches_storage(pilot):
 
 def test_deposit_does_not_require_calibration(pilot):
     c, _app, h, _keys, _chain, _s = pilot
-    assert c.post("/bond/faucet", headers=h[0]).status_code == 200
+    assert c.post("/bond/faucet", headers=h[0]).status_code == 202
+    run_work(c.app)
     r = c.post("/bond/deposit", headers=h[0])
     assert r.status_code == 200, r.text
 

@@ -78,3 +78,12 @@ def judgment_view(db, j):
             "payout": {"status": payout, "earned_skr": j.earned_skr,
                        "signature": j.payout_signature},
             "jobs": [job_view(job) for job in jobs]}
+
+
+def faucet_view(job, actor, settings):
+    # Never expose the private transaction journal through the API.
+    return {"operation_id": job.id, "type": "faucet",
+            "status": "pending" if job.status == "running" else job.status,
+            "funded": actor.skr_funded, "already": False,
+            "mints": actor.faucet_count, "max": settings.faucet_max_mints,
+            "signature": job.payload.get("signature"), "last_error": job.last_error}

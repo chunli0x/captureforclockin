@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     program_id: str
     # Required: SEEKER_SKR_MINT supplies the devnet test $SKR mint (6 decimals).
     skr_mint: str
-    verifier_key_file: Path
+    # API chain access uses public addresses; key-file settings are worker-only.
+    verifier_pubkey: str | None = None
+    treasury_pubkey: str | None = None
+    verifier_key_file: Path | None = None
     # Devnet treasury: holds the $SKR mint authority (the faucet, the bond, and
     # the settle_skr payout; one token, three jobs). Optional (0600,
     # gitignored). Unset -> the on-chain mint is unavailable and the backend

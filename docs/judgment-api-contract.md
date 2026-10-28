@@ -111,7 +111,16 @@ GET /judge/stats
     "warnings": int
   }
 
-POST /bond/faucet  (exists, mints test $SKR on-chain, idempotent)
+POST /bond/faucet
+  Returns 202 with {operation_id, type: "faucet", status, funded, already,
+  mints, max, signature, last_error}. Reserves quota and enqueues atomically;
+  a retry while pending returns the same operation. At quota exhaustion,
+  returns 200 with {funded, already: true, mints, max}.
+GET /operations/{operation_id}
+  Authenticated, wallet-scoped polling: accepted -> pending -> finalized/failed.
+  Only finalized means this faucet mint was confirmed. The worker retains
+  quota on failures, including ambiguous broadcasts, and never signs a new
+  transaction for an expired faucet job. The signed journal is never returned.
 POST /bond/deposit (exists, real deposit_bond escrow; sets bonded+worker on confirm)
 POST /bond/withdraw (exists, real withdraw_bond; clears bonded on confirm)
 
@@ -129,7 +138,7 @@ GET /batch/{id}/dataset
 /health additions (MUST be present):
   - "skr_mint", "program_id",
     "treasury" ($SKR mint-authority/treasury pubkey),
-    "slash_authority" (verifier pubkey), "skr_payout": "ready"|"unavailable",
+    "slash_authority" (configured verifier pubkey),
     "test_tokens": true, "dataset_bias": "majority-preference".
 
 ## 4. Consensus scoring (backend owns)
@@ -162,7 +171,7 @@ passing calibration. The calibration_pair/calibration_answer tables and the
 
 Payout = judge_base_skr * multiplier.
 
-## 7. On-chain $SKR payout (backend owns; chain.py)
+## 7. On-chain $SKR payout (worker owns; signing_chain.py)
 
 Add `chain.settle_skr(wallet, amount)`, pays amount $SKR to the judge's $SKR
 ATA, server-signed. The treasury keypair is the $SKR mint authority; prefer a
@@ -198,7 +207,7 @@ New account struct:
 
 `init` makes it append-only (a batch_id can only be anchored once).
 
-chain.py build path: action "post_batch", accounts = [verifier(signer), config,
+signing_chain.py build path: action "post_batch", accounts = [verifier(signer), config,
 batch_pda(init), SYSTEM, RENT], data = discriminator("post_batch") + batch_id(16)
 + merkle_root(32). Server-signed (verifier = slash_authority). `post_batch`
 currently fails closed until the new program binary is deployed.
@@ -224,3 +233,20 @@ document it in README as a hackathon-grade provenance anchor, tunable.
 Pairs/calibration/batches are loaded by an operator seed script
 (scripts/seed_judgment.py), not a public endpoint. It must insert >= 10
 calibration pairs with known choices, plus judgment pairs across >= 1 batch.
+
+
+## Signer separation
+
+The API uses `Chain`, which has no private key loading or signing methods.
+Set `SEEKER_VERIFIER_PUBKEY` to the initialized program's verifier address.
+`SEEKER_TREASURY_PUBKEY` is optional public metadata for `/health`.
+The API needs neither `SEEKER_VERIFIER_KEY_FILE` nor `SEEKER_TREASURY_KEY_FILE`;
+remove key-file mounts and permissions from the API process at deployment.
+Deposit/withdraw preparation returns a transaction with only the wallet as signer.
+
+Only `python -m seeker.worker` constructs `SigningChain`. Supply both key files
+to that process. It derives public addresses from the keys when omitted, rejects
+configured public/key mismatches, and logs signer readiness at startup. API health
+checks database/schema/RPC and program config only; it makes no signer-readiness claim.
+Existing jobs storage holds faucet journals; no schema migration is required.
+Roll out the polling client with this API contract. Deployment is handled by the PM.

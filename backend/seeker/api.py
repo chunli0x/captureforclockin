@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .chain import Chain, ChainUnavailable
 from .config import Settings
-from .outbox import enqueue, judgment_view
+from .outbox import enqueue, judgment_view, faucet_view
 from .db import (
     Actor,
     CalibrationAnswer,
@@ -41,6 +41,7 @@ from .schemas import (
     JudgmentSubmit,
     JudgmentAccepted,
     JudgmentOperationView,
+    FaucetOperationView,
     LivenessComplete,
     LivenessSession,
     Verify,
@@ -173,19 +174,8 @@ def create_app(settings: Settings, *, chain=None):
                 "dataset_bias": "majority-preference",
                 "skr_mint": settings.skr_mint,
                 "program_id": settings.program_id,
-                "treasury": (
-                    str(chain.treasury.pubkey())
-                    if getattr(chain, "treasury", None) is not None
-                    else None
-                ),
-                "slash_authority": (
-                    str(chain.verifier.pubkey())
-                    if getattr(chain, "verifier", None) is not None
-                    else None
-                ),
-                "skr_payout": (
-                    "ready" if getattr(chain, "treasury", None) is not None else "unavailable"
-                ),
+                "treasury": settings.treasury_pubkey,
+                "slash_authority": settings.verifier_pubkey,
             },
         )
 
@@ -304,33 +294,25 @@ def create_app(settings: Settings, *, chain=None):
 
     @app.post("/bond/faucet")
     def bond_faucet(actor: Auth):
-        """Devnet test $SKR faucet ("Get test $SKR"). A wallet may tap it up to
-        ``faucet_max_mints`` times (each tap mints the minimum bond and drops a
-        little SOL). Fails closed (503) so funding is never recorded for a mint
-        that did not land."""
+        """Reserve quota and enqueue atomically. Only the worker may mint."""
         with database.transaction() as db:
             actor = lock(db, Actor, actor.wallet)
+            # A retry while this wallet is waiting returns the same operation.
+            pending = db.scalar(select(Job).where(
+                Job.type == "faucet", Job.entity_id == actor.wallet,
+                Job.status.in_(("accepted", "pending", "running")),
+            ))
+            if pending is not None:
+                return JSONResponse(status_code=202, content=faucet_view(pending, actor, settings))
             if actor.faucet_count >= settings.faucet_max_mints:
                 return {
-                    "funded": actor.skr_funded,
-                    "already": True,
-                    "mints": actor.faucet_count,
-                    "max": settings.faucet_max_mints,
+                    "funded": actor.skr_funded, "already": True,
+                    "mints": actor.faucet_count, "max": settings.faucet_max_mints,
                 }
             actor.faucet_count += 1
-        try:
-            chain.faucet(actor.wallet)
-        except ChainUnavailable:
-            fail(503, "Test $SKR faucet unavailable; reserved quota retained")
-        with database.transaction() as db:
-            actor = lock(db, Actor, actor.wallet)
-            actor.skr_funded = True
-        return {
-            "funded": True,
-            "already": False,
-            "mints": actor.faucet_count,
-            "max": settings.faucet_max_mints,
-        }
+            job = enqueue(db, "faucet", actor.wallet, version=actor.faucet_count)
+            response = faucet_view(job, actor, settings)
+        return JSONResponse(status_code=202, content=response)
 
     @app.post("/bond/deposit")
     def bond_deposit(actor: Auth):
@@ -545,10 +527,12 @@ def create_app(settings: Settings, *, chain=None):
                 fail(404, "Judgment not found")
             return judgment_view(db, j)
 
-    @app.get("/operations/{operation_id}", response_model=JudgmentOperationView)
+    @app.get("/operations/{operation_id}", response_model=JudgmentOperationView | FaucetOperationView)
     def get_operation(operation_id: str, actor: Auth):
         with database.transaction() as db:
             job = db.get(Job, operation_id)
+            if job and job.type == "faucet" and job.entity_id == actor.wallet:
+                return faucet_view(job, db.get(Actor, actor.wallet), settings)
             j = db.get(Judgment, job.entity_id) if job and job.type == "reservation" else None
             if not j or j.wallet != actor.wallet:
                 fail(404, "Operation not found")

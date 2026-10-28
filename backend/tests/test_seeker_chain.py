@@ -5,7 +5,8 @@ import struct
 from types import SimpleNamespace
 
 import pytest
-from seeker.chain import Chain, ChainUnavailable, discriminator, message_fingerprint
+from seeker.signing_chain import SigningChain as Chain
+from seeker.chain import ChainUnavailable, discriminator, message_fingerprint
 from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.message import Message
@@ -239,8 +240,8 @@ def test_faucet_and_settle_build_signed_instructions(chain, tmp_path):
 
     chain.rpc = fake_rpc
     # Faucet mints min_bond $SKR to the worker (mint authority = treasury).
-    sig = chain.faucet(str(worker.pubkey()))
-    assert sig == "sig_sendTransaction"
+    sig = chain.faucet(str(worker.pubkey()), persist=lambda prepared: None)
+    assert sig
     # Settlement mints test $SKR to the judge (mint authority = treasury).
     journal = []
     sig = chain.settle_skr(str(worker.pubkey()), 100_000, memo="judgment-1", persist=journal.append)
@@ -268,7 +269,7 @@ def test_faucet_refuses_when_below_sol_floor(chain, tmp_path):
 
     chain.rpc = fake_rpc
     with pytest.raises(ChainUnavailable):
-        chain.faucet(str(Keypair().pubkey()))
+        chain.faucet(str(Keypair().pubkey()), persist=lambda prepared: None)
 
 
 def test_payment_journal_failure_prevents_broadcast(chain, payer):
