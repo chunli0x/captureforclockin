@@ -49,7 +49,7 @@ def placeholder(batch_id, side, i):
     # degraded, cycling the 6 images. Replace with the real vision-model outputs
     # when Lisa's pipeline commissions a batch.
     kind = "natural" if side == "a" else "degraded"
-    return f"https://capture.magnumopus.ai/seed/{kind}-{i % 6}.png"
+    return f"https://capture.fun/seed/{kind}-{i % 6}.png"
 
 
 def count(db, model):

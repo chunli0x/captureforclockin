@@ -27,7 +27,7 @@ from seeker.db import (  # noqa: E402
 )
 from sqlalchemy import func, select  # noqa: E402
 
-BASE = "https://capture.magnumopus.ai/seed"
+BASE = "https://capture.fun/seed"
 natural = [f"{BASE}/natural-{i}.png" for i in range(6)]
 degraded = [f"{BASE}/degraded-{i}.png" for i in range(6)]
 
